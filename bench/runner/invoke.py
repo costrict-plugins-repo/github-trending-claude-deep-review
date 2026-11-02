@@ -1,0 +1,1700 @@
+"""Headless invoker for a single golden PR (spec H3 "Per-PR flow", H8 hang guard).
+
+``build_env`` assembles the pinned, isolated invocation context: the registry-pinned bench
+``CODE_GAUNTLET_*`` knobs, the per-run output dir, ``GH_REPO``, and an isolated
+``HOME``/``CLAUDE_CONFIG_DIR`` so operator config can never leak in. It also pre-seeds
+the isolated ``.claude.json`` with the worktree marked trusted -- a headless run cannot
+answer a first-run trust dialog, so it must be accepted ahead of time.
+
+``invoke_review`` runs ``claude -p "/code-gauntlet:code-gauntlet <n>"`` under that context in its own
+process session, with a watchdog that kills the whole process group on timeout (no
+orphans), scans the output for AskUserQuestion (defense-in-depth -> ``invalid``),
+verifies the ``Headless config:`` echo receipt (accepted from raw stdout, the result
+envelope's ``.result``, or a collected report ``*.md`` -- see ``_echo_ok``), parses costs,
+reads the child's Workflow-record return envelope for pipeline failures, and locates the
+dry-run payload. Stdlib-only.
+"""
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+from contextlib import suppress
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, TypedDict
+
+from gauntlet.config import (
+    ResolverError,
+    ResolverSetupError,
+    matches_rule,
+    resolve,
+)
+from gauntlet.registry import KNOB_REGISTRY, MODEL_ALIASES
+
+from bench.runner.contracts import (
+    _is_superseded,
+    _load_dotenv_key,
+    _owner,
+    _pr_number,
+    _repo,
+    parse_result_envelope,
+    pr_dir_name,
+)
+from bench.runner.costs import parse_costs
+from bench.runner.ledger import API_AUTH_MODE, AUTH_MODES, SUBSCRIPTION_AUTH_MODE
+
+__all__ = [
+    "BENCH_ENV",
+    "BENCH_PINS",
+    "EXPECTED_ECHO",
+    "EXPECTED_ECHO_RECEIPT",
+    "PIPELINE_META_NAME",
+    "InvokeResult",
+    "_claude_home",
+    "api_key_helper_files",
+    "build_bench_env",
+    "build_env",
+    "collect_workflow_records",
+    "extract_identity_receipt",
+    "invoke_review",
+    "parse_identity_echo",
+    "parse_result_envelope",
+    "pipeline_bundle_sha256",
+    "pr_dir_name",
+    "read_pipeline_version",
+    "record_identifies_repo_bundle",
+    "resolve_claude_home",
+    "script_path_matches_repo",
+    "scriptpath_from_record",
+    "scrub_ambient",
+    "snapshot_workflow_records",
+    "supersede_attempt_artifacts",
+    "supersede_workflow_records",
+    "workflow_record_fields",
+]
+
+# Repo root == the code-gauntlet plugin dir. bench/runner/invoke.py -> parents[2].
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_PIPELINE_META_NAME_RE = re.compile(
+    r"export\s+const\s+meta\s*=\s*\{\s*name:\s*['\"]([^'\"]+)['\"]"
+)
+
+
+def _read_pipeline_meta_name():
+    path = REPO_ROOT / "workflows" / "src" / "pipeline_entry.js"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _PIPELINE_META_NAME_RE.search(text)
+    return match.group(1) if match else None
+
+
+# Read from the source entry at import time so the registered workflow name has one
+# source of truth and cannot drift from the bundle's metadata.
+PIPELINE_META_NAME = _read_pipeline_meta_name()
+
+# The metered-key .env (repo-root-relative). build_env loads ANTHROPIC_API_KEY from
+# here into every child env. A module global so tests can repoint it at a tempfile.
+ENV_PATH = REPO_ROOT / "bench" / ".env"
+
+# Bench owns this policy and pins every headless registry knob with an env name. Registry
+# defaults never feed the bench, so a registry default drift cannot silently change a run.
+BENCH_PINS = {
+    "model_tier": "optimized",
+    "delivery": "pr_comments,markdown",
+    "post_mode": "dry-run",
+    "pr_comment_cap": "25",
+    "delivery_tier": "all",
+    "draft_policy": "review",
+    "reviewed_policy": "full",
+    "pr_not_found_policy": "error",
+    "trivial_scope": "full",
+}
+
+
+def build_bench_env(pins, registry):
+    """Build the bench-owned headless env from a complete, validated pin map."""
+    rows = [
+        row
+        for row in registry
+        if "headless" in row.get("modes", []) and isinstance(row.get("env"), str)
+    ]
+    expected_keys = {row.get("key") for row in rows}
+    actual_keys = set(pins)
+    if actual_keys != expected_keys:
+        missing = expected_keys - actual_keys
+        extra = actual_keys - expected_keys
+        details = []
+        if missing:
+            details.append(
+                "missing key(s) "
+                + ", ".join(repr(key) for key in sorted(missing, key=repr))
+            )
+        if extra:
+            details.append(
+                "unexpected key(s) "
+                + ", ".join(repr(key) for key in sorted(extra, key=repr))
+            )
+        raise ValueError("BENCH_PINS key set mismatch: " + "; ".join(details))
+
+    env = {"CODE_GAUNTLET_HEADLESS": "1"}
+    for row in rows:
+        key = row["key"]
+        value = pins[key]
+        if not matches_rule(row.get("rule"), value, "headless"):
+            raise ValueError(f"BENCH_PINS[{key!r}]={value!r} is invalid for headless")
+        env[row["env"]] = value
+    return env
+
+
+BENCH_ENV = {
+    **build_bench_env(BENCH_PINS, KNOB_REGISTRY),
+    "CODE_GAUNTLET_MEASUREMENT_TRACE": "1",
+}
+
+
+try:
+    EXPECTED_ECHO_RECEIPT = resolve("headless", BENCH_ENV, None, "pr")["configEcho"]
+except (ResolverError, ResolverSetupError) as exc:
+    raise RuntimeError(
+        f"BENCH_PINS cannot resolve the expected echo receipt: {exc}"
+    ) from exc
+
+EXPECTED_ECHO = {key: entry["value"] for key, entry in EXPECTED_ECHO_RECEIPT.items()}
+
+ALL_DEGRADED_PREFIX = "all-degraded:"
+
+_ASKUSERQUESTION_RE = re.compile(r'"(?:name|tool_name)"\s*:\s*"AskUserQuestion"')
+
+# The CLI prints this to stdout (ahead of the result envelope) when the main agent turn
+# ends while a tool it launched is still running as a background task, and that task
+# outlives the CLI's background-wait ceiling: e.g. "Background tasks still running after
+# 600s; terminating." For a headless review this means the Phase 3 Workflow ran detached
+# and was killed before Phase 8 delivered — so the config-echo receipt and payload are
+# absent for that reason, NOT a config mismatch. Matched ceiling-agnostically (the number
+# of seconds varies with CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS).
+_BG_TASKS_KILLED_RE = re.compile(r"Background tasks still running after\b")
+
+# v3 drives its pipeline through the Workflow tool, first exposed by the Claude Code CLI
+# in 2.1.154. A ``--tool deep-review-v3`` run pre-flights the child CLI's version and is
+# marked ``invalid`` (never scored) on an older/unreadable CLI, rather than silently
+# running a degraded review or hanging. v2 needs no such gate. See ``_v3_preflight``.
+V3_MIN_CLAUDE_VERSION = (2, 1, 154)
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+# The slash command that triggers the review skill. It MUST be namespace-qualified as
+# ``<plugin>:<skill>`` (both are "code-gauntlet"): in the harness's pinned isolated context
+# (isolated HOME/CLAUDE_CONFIG_DIR + --plugin-dir, no --bare), Claude Code registers a
+# plugin skill's slash command only under its namespaced name. The bare/flat ``/code-gauntlet``
+# alias is not reliably registered there and resolves to "Unknown command: /code-gauntlet"
+# (num_turns 0, $0), which the runner then classes ``invalid``/``config_echo_mismatch`` --
+# the intermittent registration is why some children in a run failed and others did not.
+# Namespace-qualifying makes command resolution deterministic. See references/artifact 33
+# (P2b): skills are namespace-qualified in this isolation mode, unlike the flat --bare mode.
+SKILL_COMMAND = "code-gauntlet:code-gauntlet"
+
+# How the review child authenticates: "api" bills the metered key in bench/.env,
+# "subscription" runs on the operator's own Claude subscription capacity via the
+# long-lived OAuth token from ``claude setup-token``. The judge/scoring path is
+# always API-keyed and is unaffected. See ``_claude_auth_env``. The vocabulary is the
+# ledger's (it ends up in a row's auth_mode) and is imported, never restated.
+
+# Env credential sources the documented Claude Code precedence chain places ABOVE
+# CLAUDE_CODE_OAUTH_TOKEN (cloud providers -> ANTHROPIC_AUTH_TOKEN -> ANTHROPIC_API_KEY
+# -> apiKeyHelper -> CLAUDE_CODE_OAUTH_TOKEN -> /login). Any one of them surviving into
+# the child env silently defeats subscription mode, so subscription strips them all.
+_OUTRANKING_CREDENTIAL_VARS = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+OAUTH_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+InvokeStatus = Literal["ok", "timeout", "invalid", "failed"]
+
+
+class ModelUsageWire(TypedDict):
+    tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class InvokeResult:
+    status: InvokeStatus
+    cost_usd: float = 0.0
+    per_model: dict[str, ModelUsageWire] = field(default_factory=dict)
+    echo_ok: bool = False
+    payload_path: str | None = None
+    raw_json_path: str | None = None
+    reason: str | None = None
+
+
+# --------------------------------------------------------------------------- env
+
+
+def resolve_claude_home(workspace_dir, base_env):
+    """Return the isolated claude HOME for *workspace_dir* (``BENCH_CLAUDE_HOME`` wins).
+
+    The single derivation rule, shared by ``build_env`` (which hands the dir to the
+    child) and by ``run.py``'s preflight (which must inspect the very same dir -- an
+    ``apiKeyHelper`` in a settings file the preflight never looked at would outrank the
+    OAuth token at runtime). Callers that only have a run dir go through
+    :func:`_claude_home`; nothing else may re-derive the path.
+    """
+    override = base_env.get("BENCH_CLAUDE_HOME")
+    if override:
+        return Path(override)
+    return Path(workspace_dir) / "claude-home"
+
+
+def _claude_home(run_dir, base_env):
+    # Shared isolated home for the workspace: run_dir is <workspace>/runs/<run_id>.
+    return resolve_claude_home(Path(run_dir).resolve().parent.parent, base_env)
+
+
+# The settings filenames Claude Code layers, and the dirs under the isolated home they
+# can appear in: ``config/`` is the CLAUDE_CONFIG_DIR build_env sets, and ``.claude/`` is
+# where a HOME-relative user-settings read would land. Both are scanned because the
+# inspection is fail-closed -- its only outcome is a refusal -- and BENCH_CLAUDE_HOME can
+# point at a home the harness did not create.
+_SETTINGS_FILES = ("settings.json", "settings.local.json")
+_SETTINGS_DIRS = ("config", ".claude")
+
+
+# Named ``..._files`` for what it returns, which matters beyond readability: a static
+# analyser's credential heuristic matches any ``api?key`` identifier and then reads the
+# returned value as a credential wherever it is printed -- and ``check_prereqs`` does print
+# it, to name the offending file. "file" (like "path") is that heuristic's own de-classifier
+# for a filename, which is all this ever yields. A rename back to ``..._sources`` would
+# reintroduce a false clear-text-logging alert on the prereq output.
+def api_key_helper_files(claude_home):
+    """Return the settings files under *claude_home* that define an ``apiKeyHelper``.
+
+    An ``apiKeyHelper`` outranks ``CLAUDE_CODE_OAUTH_TOKEN`` in the documented
+    precedence chain, and unlike an env var it cannot be stripped from the child env --
+    so subscription mode refuses the run instead, naming the offending file. This
+    is a preflight-only inspection: it runs on every prereq check, including on machines
+    with no claude home at all, so a missing dir, an unreadable file, corrupt JSON, or a
+    non-object document all read as "no helper" rather than raising. Paths are returned
+    sorted as ``str`` so the failure message is deterministic.
+
+    Scoped to the isolated home. Settings scopes outside it -- a golden worktree's own
+    ``.claude/settings.json``, enterprise managed settings -- are documented limitations
+    of the mode rather than checks here (bench/README.md, "Child auth modes").
+    """
+    home = Path(claude_home)
+    found = []
+    for subdir in _SETTINGS_DIRS:
+        for name in _SETTINGS_FILES:
+            path = home / subdir / name
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            helper = data.get("apiKeyHelper")
+            if isinstance(helper, str) and not helper.strip():
+                continue
+            if not helper:
+                continue
+            found.append(str(path))
+    return sorted(found)
+
+
+def _worktree_dir(run_dir, pr):
+    return Path(run_dir) / pr_dir_name(pr) / "worktree"
+
+
+def snapshot_workflow_records(claude_home):
+    """Return ``{resolved_path: (mtime_ns, size)}`` for every ``wf_*.json`` under config.
+
+    Per-child Workflow tool records live under
+    ``{CLAUDE_CONFIG_DIR}/projects/<slug>/<session>/workflows/wf_*.json`` and carry the
+    ``scriptPath`` the plugin-identity smoke gate needs. The result envelope in
+    ``raw.json`` (``claude -p --output-format json``) does **not** include tool inputs,
+    so these files are the only durable source. Snapshot before an invoke so
+    ``collect_workflow_records`` can copy only records this PR created or updated.
+    """
+    root = Path(claude_home) / "config"
+    out = {}
+    if not root.is_dir():
+        return out
+    for path in root.rglob("wf_*.json"):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        out[str(path.resolve())] = (st.st_mtime_ns, st.st_size)
+    return out
+
+
+def _iter_new_wf_paths(root, baseline):
+    """Yield ``wf_*.json`` Paths under *root* that are new/changed vs *baseline*."""
+    baseline = baseline or {}
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("wf_*.json")):
+        try:
+            resolved = str(path.resolve())
+            st = path.stat()
+        except OSError:
+            continue
+        prev = baseline.get(resolved)
+        if prev is not None and prev == (st.st_mtime_ns, st.st_size):
+            continue
+        yield path
+
+
+def _iter_new_wf_records(claude_home, baseline):
+    """Yield ``(path, data)`` for parseable new/changed Workflow records."""
+    root = Path(claude_home) / "config"
+    for path in _iter_new_wf_paths(root, baseline):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            yield path, data
+
+
+def _unique_target(dest_dir, name):
+    """Return a path under ``dest_dir`` for ``name``, suffixing on collision.
+
+    First call for a free name returns ``dest_dir / name``. If that exists,
+    try ``{stem}-2{suffix}``, ``{stem}-3{suffix}``, … — never overwrite.
+    Shared by :func:`collect_workflow_records` and
+    :func:`supersede_workflow_records`.
+    """
+    dest_dir = Path(dest_dir)
+    target = dest_dir / name
+    if not target.exists():
+        return target
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    n = 2
+    while True:
+        candidate = dest_dir / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def collect_workflow_records(claude_home, pr_dir, baseline=None):
+    """Copy new/changed ``wf_*.json`` records into ``{pr_dir}/workflows/``.
+
+    ``baseline`` is the dict from :func:`snapshot_workflow_records` taken before the
+    child ran. Returns the list of basenames copied. Name collisions (same ``wf_`` id
+    from a different project slug) get a numeric suffix so nothing is overwritten.
+    """
+    root = Path(claude_home) / "config"
+    dest_dir = Path(pr_dir) / "workflows"
+    copied = []
+    for path in _iter_new_wf_paths(root, baseline):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = _unique_target(dest_dir, path.name)
+        try:
+            shutil.copy2(path, target)
+        except OSError:
+            continue
+        copied.append(target.name)
+    return copied
+
+
+def supersede_workflow_records(pr_dir):
+    """Move current-attempt ``wf_*.json`` into ``{pr_dir}/workflows/superseded/``.
+
+    Called at the start of every ``_resume`` invocation (plain ``--resume`` and
+    ``--retry-failed``) for each PR about to be re-invoked, so the meaning is
+    "this attempt is superseded" — not "the retry succeeded".
+    Non-recursive: only direct children of ``workflows/`` move; an existing
+    ``superseded/`` tree is left alone. Missing or empty ``workflows/`` is a
+    clean no-op. Collisions in ``superseded/`` get a numeric suffix (never
+    overwrite a forensic record). Returns the list of moved basenames.
+    """
+    wf_dir = Path(pr_dir) / "workflows"
+    if not wf_dir.is_dir():
+        return []
+    records = sorted(p for p in wf_dir.glob("wf_*.json") if p.is_file())
+    if not records:
+        return []
+    dest_dir = wf_dir / "superseded"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for path in records:
+        target = _unique_target(dest_dir, path.name)
+        try:
+            shutil.move(str(path), str(target))
+        except OSError:
+            continue
+        moved.append(path.name)
+    return moved
+
+
+_ATTEMPT_ARTIFACT_PATTERNS = (
+    "measurement-*.json",
+    "code-gauntlet-*",
+    "post-review-payload*.json",
+    "risk-table-*.json",
+)
+
+
+def supersede_attempt_artifacts(pr_dir):
+    """Move current-attempt deliverables into ``{pr_dir}/superseded/``.
+
+    Only regular files that are direct children of ``pr_dir`` are moved. Raw output,
+    diffs, worktrees, workflows, and any existing ``superseded/`` tree stay in place;
+    the path component is the shared marker every consumer uses to ignore archives.
+    Missing ``pr_dir`` is a clean no-op. Collisions get a numeric suffix (never
+    overwrite a forensic record). Move errors propagate so a retry cannot read a
+    mixed old/new artifact set. Returns sorted moved basenames.
+    """
+    pr_dir = Path(pr_dir)
+    if not pr_dir.is_dir():
+        return []
+    artifacts = sorted(
+        path
+        for path in pr_dir.iterdir()
+        if path.is_file()
+        and any(path.match(pattern) for pattern in _ATTEMPT_ARTIFACT_PATTERNS)
+    )
+    if not artifacts:
+        return []
+    dest_dir = pr_dir / "superseded"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for path in artifacts:
+        target = _unique_target(dest_dir, path.name)
+        shutil.move(str(path), str(target))
+        moved.append(path.name)
+    return moved
+
+
+def _seed_trust(config_dir, worktree):
+    """Merge ``worktree`` into ``.claude.json`` projects as trust-accepted.
+
+    Preserves any existing file content (other projects, other top-level keys); a
+    corrupt/absent file is treated as empty rather than raising.
+    """
+    config_dir = Path(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / ".claude.json"
+
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        projects = {}
+
+    key = str(Path(worktree).resolve())
+    entry = projects.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry["hasTrustDialogAccepted"] = True
+    projects[key] = entry
+    data["projects"] = projects
+
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def resolve_gh_token(base_env):
+    """Resolve once in the operator environment; never expose gh diagnostics."""
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if base_env.get(name):
+            return base_env[name]
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token", "--hostname", "github.com"],
+            env=base_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def preflight_gh(pr, workspace_dir, base_env, child_auth=API_AUTH_MODE):
+    """Probe PR access with the same isolated environment the review children use."""
+    token = resolve_gh_token(base_env)
+    if not token:
+        return None
+    runtime_env = dict(base_env, GH_TOKEN=token)
+    try:
+        child_env = build_env(
+            pr, Path(workspace_dir) / "runs" / "preflight", runtime_env, child_auth
+        )
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                "--hostname",
+                "github.com",
+                f"repos/{_owner(pr)}/{_repo(pr)}/pulls/{_pr_number(pr)}",
+            ],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return token if result.returncode == 0 else None
+
+
+def _gh_auth_env(base_env):
+    """Keep token overrides and the operator's gh config pointer across HOME isolation."""
+    result = {}
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        value = base_env.get(name)
+        if value:
+            result[name] = value
+
+    explicit = base_env.get("GH_CONFIG_DIR")
+    if explicit:
+        result["GH_CONFIG_DIR"] = explicit
+        return result
+
+    xdg = base_env.get("XDG_CONFIG_HOME")
+    home = base_env.get("HOME")
+    if xdg:
+        gh_dir = Path(xdg) / "gh"
+    elif home:
+        gh_dir = Path(home) / ".config" / "gh"
+    else:
+        return result
+    if gh_dir.is_dir():
+        result["GH_CONFIG_DIR"] = str(gh_dir)
+    return result
+
+
+def _claude_auth_env(base_env, child_auth):
+    """Return ``(updates, removals)``: how one ``child_auth`` mode credentials the child.
+
+    The auth analogue of ``_gh_auth_env`` -- the one place a credential decision is
+    made, so the mode cannot be re-derived (or silently defaulted) anywhere downstream.
+    Claude Code resolves credentials in a fixed order: cloud providers
+    (``CLAUDE_CODE_USE_BEDROCK``/``CLAUDE_CODE_USE_VERTEX``) -> ``ANTHROPIC_AUTH_TOKEN``
+    -> ``ANTHROPIC_API_KEY`` -> ``apiKeyHelper`` -> ``CLAUDE_CODE_OAUTH_TOKEN`` ->
+    ``/login``. The child inherits the operator's full env, so the mode is only real if
+    the losing sources are removed rather than merely left unset.
+
+    - ``"api"`` (the default, and behaviourally what every recorded run used): inject
+      ``ANTHROPIC_API_KEY`` from ``bench/.env`` when it holds one, remove nothing. The
+      isolated ``HOME``/``CLAUDE_CONFIG_DIR`` carries no credentials, so without this
+      every ``claude`` invocation would be unauthenticated; the ``.env`` value WINS over
+      any ambient key so all bench spend lands on the single metered key. A
+      missing/empty ``.env`` or key leaves the ambient env untouched (the prereq check
+      reports that separately).
+    - ``"subscription"``: strip ``_OUTRANKING_CREDENTIAL_VARS`` and set
+      ``CLAUDE_CODE_OAUTH_TOKEN`` from ``bench/.env``, else from *base_env* -- one
+      precedence rule for that file, mirroring ``ANTHROPIC_API_KEY``. The remaining
+      over-ranking source, an ``apiKeyHelper`` in the isolated settings, lives in a file
+      and cannot be stripped here; ``check_prereqs`` refuses the run instead (see
+      :func:`api_key_helper_files`). No token in either source is unrecoverable at
+      invocation time, so it raises rather than falling back to the metered key.
+
+    Raises ``RuntimeError`` for a subscription run with no token and ``ValueError`` for
+    an unknown mode. Neither message -- nor anything else here -- may carry a credential
+    value: these strings reach stderr, the run log, and the artifacts.
+    """
+    if child_auth == API_AUTH_MODE:
+        api_key = _load_dotenv_key(ENV_PATH, "ANTHROPIC_API_KEY")
+        return ({"ANTHROPIC_API_KEY": api_key} if api_key else {}, ())
+    if child_auth == SUBSCRIPTION_AUTH_MODE:
+        token = _load_dotenv_key(ENV_PATH, OAUTH_TOKEN_VAR) or base_env.get(
+            OAUTH_TOKEN_VAR
+        )
+        if not token:
+            # Var name as a literal, not interpolated from the constant: this message
+            # reaches stderr and the checkpoint detail, and a credential-named identifier
+            # flowing into either is reported as clear-text exposure even when only the
+            # name travels. A test holds the literal and the constant to one spelling.
+            raise RuntimeError(
+                "child_auth=subscription needs CLAUDE_CODE_OAUTH_TOKEN: run "
+                f"`claude setup-token` and put the token in {ENV_PATH} as "
+                "CLAUDE_CODE_OAUTH_TOKEN=..., or export it. Found none in either "
+                "source."
+            )
+        return ({OAUTH_TOKEN_VAR: token}, _OUTRANKING_CREDENTIAL_VARS)
+    raise ValueError(
+        "unknown child_auth {!r}; expected one of {}".format(
+            child_auth, ", ".join(AUTH_MODES)
+        )
+    )
+
+
+def scrub_ambient(env):
+    """Remove every CODE_GAUNTLET_* variable and return the clean env and names removed."""
+    removed = sorted(name for name in env if name.startswith("CODE_GAUNTLET_"))
+    clean = {name: value for name, value in env.items() if name not in removed}
+    return clean, removed
+
+
+def build_env(pr, run_dir, base_env, child_auth=API_AUTH_MODE):
+    """Assemble the pinned isolated env for one PR invocation (side effect: seeds trust).
+
+    ``child_auth`` selects how the child authenticates (``ledger.AUTH_MODES``); see
+    ``_claude_auth_env`` for the credential contract and for why subscription mode has
+    to REMOVE the higher-precedence credential vars rather than just not set them.
+    Subscription mode additionally requires that the isolated config carry no
+    ``apiKeyHelper`` -- a file cannot be stripped from an env, so ``check_prereqs``
+    guards that ahead of the run via :func:`api_key_helper_files`.
+
+    The ``HOME``/``CLAUDE_CONFIG_DIR`` override isolates the *claude* binary's settings
+    and plugins (the S7 boundary); it must not strand ``gh``, which the skill's children
+    call. ``_gh_auth_env`` re-establishes ``gh``'s auth (``GH_CONFIG_DIR`` pointing at the
+    real home, plus any ``GH_TOKEN``/``GITHUB_TOKEN``) across that override -- ``gh`` auth
+    is an ambient prerequisite, not part of the claude-config isolation.
+    """
+    run_dir = Path(run_dir)
+    env, _ = scrub_ambient(base_env)
+    # Ambient alias mappings would silently replace the benchmark's pinned models.
+    for alias in (*MODEL_ALIASES, "fable"):
+        env.pop(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL", None)
+    env.update(BENCH_ENV)
+    env["DISABLE_AUTOUPDATER"] = "1"
+    auth_updates, auth_removals = _claude_auth_env(base_env, child_auth)
+    for name in auth_removals:
+        env.pop(name, None)
+    env.update(auth_updates)
+    env["CODE_GAUNTLET_OUTPUT_DIR"] = str(run_dir / "output")
+    env["GH_REPO"] = f"{_owner(pr)}/{_repo(pr)}"
+    # Let the watchdog own the time bound; the CLI ceiling can kill a detached Workflow.
+    env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = "0"
+
+    claude_home = _claude_home(run_dir, base_env)
+    config_dir = claude_home / "config"
+    env["HOME"] = str(claude_home)
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env.update(_gh_auth_env(base_env))
+
+    _seed_trust(config_dir, _worktree_dir(run_dir, pr))
+    return env
+
+
+# ------------------------------------------------------------------------- invoke
+
+
+def _kill_group(proc):
+    with suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
+# ---------------------------------------------------------------- plugin integrity
+
+# Paths in the plugin repo the CONTROLLER/operator legitimately rewrites during a run (not
+# child contamination), excluded from the mutation guard so they never false-flag a clean
+# run:
+#   - bench/experiments.jsonl — the experiment ledger, appended by the controller every PR.
+#   - bench/report.html — the live dashboard, regenerated from the ledger by bench/report.py
+#     (a tracked file stamped with today's date + the plugin sha, so ANY regeneration dirties
+#     it). Operators run report.py mid-run to watch progress; without this exemption that
+#     regeneration lands in REPO_ROOT's `git status` while a review child is in-flight and is
+#     mis-attributed to it — invalidating a good (often long-running, expensive) PR as
+#     'plugin_mutated_by_child' and resetting the dashboard. It is NOT written by any review
+#     child (the pipeline writes every artifact to the absolute, gitignored {output_dir}; only
+#     report.py touches report.html), so it belongs with the ledger as controller/operator-owned.
+# Everything else changing means a child wrote into the plugin (self-healing mid-run), which
+# contaminates the measurement.
+_CONTROLLER_OWNED_PATHS = frozenset({"bench/experiments.jsonl", "bench/report.html"})
+
+
+def _git(args, repo_root):
+    """Run a git command in ``repo_root``; return ``(stdout, returncode)`` (rc=-1 on
+    launch failure). Never raises — the guard degrades to "cannot judge" instead."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except OSError:
+        return ("", -1)
+    return (proc.stdout, proc.returncode)
+
+
+def _parse_porcelain(text):
+    """Parse ``git status --porcelain`` into ``[(status_xy, path)]``.
+
+    Resolves rename/copy targets (``orig -> new`` -> ``new``) and strips the quotes git
+    adds around paths with special characters. Blank lines are ignored.
+    """
+    entries = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        status, path = line[:2], line[3:]
+        if " -> " in path:  # rename/copy entry: 'orig -> new'
+            path = path.split(" -> ", 1)[1]
+        entries.append((status, path.strip().strip('"')))
+    return entries
+
+
+def _plugin_dirty_paths(repo_root):
+    """Set of paths currently dirty in the plugin repo — the pre-run BASELINE for the
+    mutation guard. Empty set on a clean repo; ``None`` when ``git status`` can't be read.
+
+    The guard compares against this so a legitimate pre-existing local edit (a dev's WIP,
+    or the controller's experiments.jsonl already modified) is never mistaken for — or
+    reset as — child contamination. Only NEW dirtiness a child introduces is flagged.
+    """
+    out, rc = _git(["status", "--porcelain"], repo_root)
+    if rc != 0:
+        return None
+    return {p for _s, p in _parse_porcelain(out)}
+
+
+def _plugin_mutations(repo_root, baseline_paths=frozenset()):
+    """Return child-caused changes ``[(status, path)]`` in the plugin repo: paths dirty
+    now that were NOT dirty in ``baseline_paths`` and are not controller-owned. ``None``
+    when ``git status`` can't be read (cannot judge — the caller then does not flag/reset)."""
+    out, rc = _git(["status", "--porcelain"], repo_root)
+    if rc != 0:
+        return None
+    baseline = baseline_paths or frozenset()
+    return [
+        (s, p)
+        for (s, p) in _parse_porcelain(out)
+        if p not in _CONTROLLER_OWNED_PATHS and p not in baseline
+    ]
+
+
+def _reset_plugin_repo(repo_root, mutations):
+    """Undo child mutations to the plugin repo: delete untracked files/dirs, revert
+    tracked edits with ``git checkout --``. Controller-owned paths were already filtered
+    out (``_plugin_mutations``), so experiments.jsonl is never reverted."""
+    repo_root = Path(repo_root)
+    for status, path in mutations:
+        target = repo_root / path
+        if status.strip() == "??":  # untracked — checkout won't remove it
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                with suppress(OSError):
+                    target.unlink()
+        else:
+            _git(["checkout", "--", path], repo_root)
+
+
+def _has_askuserquestion(raw_text, envelope):
+    if envelope:
+        for denial in envelope.get("permission_denials") or []:
+            if isinstance(denial, dict):
+                if any(v == "AskUserQuestion" for v in denial.values()):
+                    return True
+                if "AskUserQuestion" in json.dumps(denial):
+                    return True
+            elif denial == "AskUserQuestion":
+                return True
+    return bool(_ASKUSERQUESTION_RE.search(raw_text or ""))
+
+
+def _workflow_backgrounded(raw_text):
+    """True when the CLI killed a still-running background task at its wait ceiling.
+
+    Signature: the ``Background tasks still running after <n>s; terminating`` notice the
+    CLI prints ahead of the result envelope. For a headless review it means the Phase 3
+    Workflow ran detached and was terminated before Phase 8 — a distinct outcome from a
+    genuine config-echo mismatch, so the runner labels it ``workflow_backgrounded``.
+    """
+    return bool(_BG_TASKS_KILLED_RE.search(raw_text or ""))
+
+
+def _echo_in_text(text):
+    """True when *text* carries the full receipt: every expected knob line present."""
+    text = text or ""
+    for key, value in EXPECTED_ECHO.items():
+        pattern = rf"(?m)^[ \t]*{re.escape(key)}={re.escape(value)}(?:[ \t]|\(|$)"
+        if not re.search(pattern, text):
+            return False
+    return True
+
+
+def _transcript_records(path):
+    """Yield the type and content blocks of assistant and user session records."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as transcript:
+            for line in transcript:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                record_type = record.get("type")
+                if record_type not in ("assistant", "user"):
+                    continue
+                message = record.get("message")
+                blocks = message.get("content") if isinstance(message, dict) else None
+                if isinstance(blocks, list):
+                    yield record_type, blocks
+    except OSError:
+        return
+
+
+def _tool_result_text(block):
+    """Flatten textual content from a tool_result block."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    return "\n".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+    )
+
+
+def _transcript_bash_results(config_dir, worktree, envelope):
+    """Read only this session's Bash results, excluding prompts and API records."""
+    session_id = envelope.get("session_id") if isinstance(envelope, dict) else None
+    if not isinstance(session_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]+", session_id
+    ):
+        return
+    project_slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(worktree).resolve()))
+    path = Path(config_dir) / "projects" / project_slug / f"{session_id}.jsonl"
+    bash_ids = set()
+    for record_type, blocks in _transcript_records(path):
+        if record_type == "assistant":
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use" or block.get("name") != "Bash":
+                    continue
+                tool_id = block.get("id")
+                if isinstance(tool_id, str):
+                    bash_ids.add(tool_id)
+            continue
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id")
+            if not isinstance(tool_use_id, str) or tool_use_id not in bash_ids:
+                continue
+            content = _tool_result_text(block)
+            if content is not None:
+                yield content
+
+
+def _echo_in_reports(report_dirs):
+    """True when any ``*.md`` under any of *report_dirs* carries the full receipt."""
+    seen = set()
+    for base in report_dirs:
+        if not base:
+            continue
+        base = Path(base)
+        if not base.exists():
+            continue
+        for md in sorted(base.rglob("*.md")):
+            # Archived attempts must not satisfy the current attempt's receipt.
+            if _is_superseded(md):
+                continue
+            resolved = md.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if _echo_in_text(md.read_text(errors="replace", encoding="utf-8")):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _echo_ok(raw_text, envelope=None, report_dirs=()):
+    """True when the ``Headless config:`` receipt is present in ANY available source.
+
+    A ``-p --output-format json`` run hides intermediate-turn stdout: only the final
+    message survives in the envelope's ``.result``. So the receipt is accepted from
+    (a) the raw stdout text, (b) the envelope ``.result`` text, or (c) any collected
+    report ``*.md`` under *report_dirs* (the run output dir and the PR dir). Missing
+    from all three -> not ok (the run is classified ``invalid``/``config_echo_mismatch``).
+    """
+    texts = [raw_text or ""]
+    if isinstance(envelope, dict):
+        result = envelope.get("result")
+        if isinstance(result, str):
+            texts.append(result)
+    if any(_echo_in_text(t) for t in texts):
+        return True
+    return _echo_in_reports(report_dirs)
+
+
+_PIPELINE_VERSION_RE = re.compile(r"const\s+PIPELINE_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
+_IDENTITY_LINE_RE = re.compile(
+    r"(?m)^[ \t]*(pipeline_version|plugin_root)=(.+?)\s*\((?:bundle|resolved)\)\s*$"
+)
+_CODE_RENDERED_REPORT_GLOB = "code-gauntlet-report-*.md"
+
+
+def read_pipeline_version(repo_root):
+    """Return PIPELINE_VERSION from ``{repo_root}/workflows/pipeline.js``, or None."""
+    path = Path(repo_root) / "workflows" / "pipeline.js"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _PIPELINE_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def parse_identity_echo(text):
+    """Parse identity receipt fields from a Headless config echo text blob."""
+    out = {}
+    for m in _IDENTITY_LINE_RE.finditer(text or ""):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def extract_identity_receipt(raw_text, envelope=None, report_dirs=()):
+    """Return ``{pipeline_version, plugin_root}`` from any echo source, or None.
+
+    Requires BOTH fields in the same source text. Prefer a collected report copy because it
+    is code-rendered, then the envelope ``.result``, then raw stdout. The latter two remain
+    useful fallbacks for runs whose report never materialized.
+    """
+    # Reports are the source of record once materialized. A model can type a plausible
+    # identity into stdout or the envelope, but it cannot outrank the code-owned report.
+    seen = set()
+    for base in report_dirs or ():
+        if not base:
+            continue
+        base = Path(base)
+        if not base.exists():
+            continue
+        for md in sorted(base.rglob(_CODE_RENDERED_REPORT_GLOB)):
+            # Archived attempts must not satisfy the current attempt's identity receipt.
+            if _is_superseded(md):
+                continue
+            resolved = md.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                got = parse_identity_echo(
+                    md.read_text(errors="replace", encoding="utf-8")
+                )
+            except OSError:
+                continue
+            if "pipeline_version" in got and "plugin_root" in got:
+                return got
+
+    texts = []
+    if isinstance(envelope, dict):
+        result = envelope.get("result")
+        if isinstance(result, str):
+            texts.append(result)
+    texts.append(raw_text or "")
+    for t in texts:
+        got = parse_identity_echo(t)
+        if "pipeline_version" in got and "plugin_root" in got:
+            return got
+    return None
+
+
+def _record_tool_input(data):
+    """Return the object carrying a Workflow record's tool input, or None.
+
+    Top-level fields win; otherwise a single wrapper key (``input`` /
+    ``toolInput`` / ``parameters``) holds them. Nested paths such as
+    ``args.verify.scriptPath`` are intentionally ignored — a recursive walk
+    would false-fail healthy skill runs.
+    """
+    if not isinstance(data, dict):
+        return None
+    sp = data.get("scriptPath")
+    if isinstance(sp, str) and sp:
+        return data
+    for key in ("input", "toolInput", "parameters"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            sp = nested.get("scriptPath")
+            if isinstance(sp, str) and sp:
+                return nested
+    return None
+
+
+def _record_args_holder(data):
+    """Return the object carrying a Workflow record's ``args``, or None."""
+    holder = _record_tool_input(data)
+    if holder is not None:
+        return holder
+    if not isinstance(data, dict):
+        return None
+    if "args" in data:
+        return data
+    for key in ("input", "toolInput", "parameters"):
+        nested = data.get(key)
+        if isinstance(nested, dict) and "args" in nested:
+            return nested
+    return None
+
+
+def scriptpath_from_record(data):
+    """Return the Workflow-tool ``scriptPath`` from a parsed ``wf_*.json`` dict."""
+    holder = _record_tool_input(data)
+    return holder.get("scriptPath") if holder is not None else None
+
+
+def workflow_record_fields(data):
+    """Return ``(scriptPath, workflowName, script)`` from a parsed Workflow record.
+
+    Workflow records normally carry these fields in the same top-level object as the
+    tool input. Older CLI shapes may wrap the tool input under ``input``,
+    ``toolInput``, or ``parameters``. The top-level name/script are retained as a
+    fallback because newer records can place those receipt fields beside a wrapper.
+    """
+    if not isinstance(data, dict):
+        return (None, None, None)
+    holder = _record_tool_input(data)
+    if holder is None:
+        if any(
+            data.get(key) is not None
+            for key in ("scriptPath", "workflowName", "script")
+        ):
+            return (None, data.get("workflowName"), data.get("script"))
+        return (None, None, None)
+    return (
+        holder.get("scriptPath"),
+        holder.get("workflowName", data.get("workflowName")),
+        holder.get("script", data.get("script")),
+    )
+
+
+def pipeline_bundle_sha256(repo_root, expected_pipeline=None):
+    """Return the SHA-256 hex digest of the expected repo bundle, or None."""
+    path = (
+        Path(expected_pipeline)
+        if expected_pipeline is not None
+        else Path(repo_root) / "workflows" / "pipeline.js"
+    )
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def script_path_matches_repo(script_path, repo_root, expected_pipeline=None):
+    """True when *script_path* identifies ``{repo_root}/workflows/pipeline.js``.
+
+    Accepts absolute paths that resolve to the expected pipeline, the normalized
+    absolute string form, the relative literals ``workflows/pipeline.js`` /
+    ``./workflows/pipeline.js``, and other relative paths that resolve against
+    *repo_root* (not process CWD) to the expected file.
+    """
+    if expected_pipeline is None:
+        expected = (Path(repo_root) / "workflows" / "pipeline.js").resolve()
+    else:
+        expected = Path(expected_pipeline).resolve()
+    normalized = script_path.replace("\\", "/").rstrip("/")
+    expected_norm = str(expected).replace("\\", "/")
+    if normalized == expected_norm:
+        return True
+    if normalized in ("workflows/pipeline.js", "./workflows/pipeline.js"):
+        return True
+    candidate = Path(script_path)
+    try:
+        if candidate.is_absolute():
+            return candidate.resolve() == expected
+        return (Path(repo_root) / candidate).resolve() == expected
+    except OSError:
+        return False
+
+
+def record_identifies_repo_bundle(
+    record, repo_root, expected_pipeline=None, *, expected_bundle_hash=None
+):
+    """True when a Workflow record identifies the repo's pipeline bundle.
+
+    Older records are identified by a ``scriptPath`` resolving to the repo bundle.
+    Name-based records use the workflow metadata name plus the exact UTF-8 bundle
+    bytes echoed in their ``script`` field. The expected hash is optional so callers
+    can cache one repo read for a batch without sharing a cache across repo roots.
+    """
+    script_path, workflow_name, script = workflow_record_fields(record)
+    if isinstance(script_path, str) and script_path_matches_repo(
+        script_path, repo_root, expected_pipeline=expected_pipeline
+    ):
+        return True
+    if workflow_name != PIPELINE_META_NAME or not isinstance(script, str):
+        return False
+    if expected_bundle_hash is None:
+        expected_bundle_hash = pipeline_bundle_sha256(repo_root, expected_pipeline)
+    if expected_bundle_hash is None:
+        return False
+    return (
+        hashlib.sha256(script.encode("utf-8", errors="surrogatepass")).hexdigest()
+        == expected_bundle_hash
+    )
+
+
+def workflow_record_identity_reason(
+    record, repo_root, expected_pipeline=None, *, expected_bundle_hash=None
+):
+    """Return concise reasons why a parsed Workflow record is not repo-identified."""
+    script_path, workflow_name, script = workflow_record_fields(record)
+    if not script_path and not script:
+        return "no scriptPath or script field"
+    reasons = []
+    if not (
+        isinstance(script_path, str)
+        and script_path_matches_repo(
+            script_path, repo_root, expected_pipeline=expected_pipeline
+        )
+    ):
+        reasons.append("path not repo bundle")
+    if workflow_name != PIPELINE_META_NAME:
+        reasons.append("workflowName mismatch")
+    if not isinstance(script, str):
+        reasons.append("script bytes differ")
+    else:
+        if expected_bundle_hash is None:
+            expected_bundle_hash = pipeline_bundle_sha256(repo_root, expected_pipeline)
+        if (
+            expected_bundle_hash is None
+            or hashlib.sha256(
+                script.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()
+            != expected_bundle_hash
+        ):
+            reasons.append("script bytes differ")
+    return "; ".join(reasons) or "not repo bundle"
+
+
+# Backward-compatible private alias used by existing tests.
+def _script_path_matches_repo(script_path, repo_root):
+    return script_path_matches_repo(script_path, repo_root)
+
+
+def _new_workflow_script_paths(claude_home, baseline, records=None):
+    """Top-level Workflow ``scriptPath`` values from records changed since *baseline*.
+
+    ``records`` is the materialized ``_iter_new_wf_records`` output when the caller
+    already parsed them; each record embeds the whole bundle, so parsing once per
+    invocation matters.
+    """
+    paths = []
+    if records is None:
+        records = _iter_new_wf_records(claude_home, baseline)
+    for _path, data in records:
+        sp = scriptpath_from_record(data)
+        if sp:
+            paths.append(sp)
+    return paths
+
+
+def _workflow_failure(
+    claude_home, baseline, repo_root, output_dir, records=None
+) -> tuple[str, str] | None:
+    """Return a correlated pipeline failure ``(reason, error_text)``, if any.
+
+    Workflow records are filtered by both the checked-out pipeline identity and the
+    per-invocation output directory. A later successful record supersedes failures from
+    the same invocation, regardless of record filename ordering. New records identify
+    the pipeline by workflow name plus bundle content; older path records remain valid.
+    """
+    expected_output = os.path.realpath(str(output_dir))
+    success = False
+    failure: tuple[str, str] | None = None
+    if records is None:
+        records = _iter_new_wf_records(claude_home, baseline)
+    expected_pipeline = Path(repo_root) / "workflows" / "pipeline.js"
+    expected_bundle_hash = pipeline_bundle_sha256(repo_root, expected_pipeline)
+    for _path, data in records:
+        if not record_identifies_repo_bundle(
+            data,
+            repo_root,
+            expected_pipeline=expected_pipeline,
+            expected_bundle_hash=expected_bundle_hash,
+        ):
+            continue
+
+        holder = _record_args_holder(data)
+        if holder is None:
+            continue
+        args = holder.get("args")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        record_output = args.get("outputDir")
+        if not isinstance(record_output, str):
+            continue
+        if os.path.realpath(record_output) != expected_output:
+            continue
+
+        result = data.get("result")
+        if not isinstance(result, dict):
+            continue
+        if result.get("ok") is True:
+            success = True
+            continue
+        if result.get("ok") is not False or failure is not None:
+            continue
+
+        error = result.get("error")
+        error_str = error if isinstance(error, str) else ""
+        error_text = error_str or str(result.get("failingPhase") or "")
+        gaps = result.get("gaps") or []
+        gap_has_prefix = isinstance(gaps, (list, tuple)) and any(
+            isinstance(gap, str) and gap.startswith(ALL_DEGRADED_PREFIX) for gap in gaps
+        )
+        reason = (
+            "all_degraded"
+            if error_str.startswith(ALL_DEGRADED_PREFIX) or gap_has_prefix
+            else "pipeline_failed"
+        )
+        failure = (reason, error_text)
+
+    return None if success else failure
+
+
+def _identity_mismatch(receipt, repo_root):
+    expected_ver = read_pipeline_version(repo_root)
+    if not expected_ver:
+        return "cannot read expected PIPELINE_VERSION from workflows/pipeline.js"
+    if receipt["pipeline_version"] != expected_ver:
+        return "pipeline_version {!r} != expected {!r}".format(
+            receipt["pipeline_version"], expected_ver
+        )
+    try:
+        got_root = Path(receipt["plugin_root"]).resolve()
+        exp_root = Path(repo_root).resolve()
+    except (OSError, ValueError) as exc:
+        return f"plugin_root resolve failed: {exc}"
+    if got_root != exp_root:
+        return f"plugin_root {str(got_root)!r} != expected {str(exp_root)!r}"
+    return None
+
+
+def _check_plugin_identity(
+    raw_text, envelope, report_dirs, claude_home, wf_baseline, repo_root, records=None
+):
+    """Return None if identity is clean, else a human reason fragment for stderr."""
+    receipt = extract_identity_receipt(raw_text, envelope, report_dirs)
+    if not receipt:
+        return "missing pipeline_version/plugin_root identity receipt"
+    identity_err = _identity_mismatch(receipt, repo_root)
+    if identity_err:
+        return identity_err
+    if records is None:
+        records = list(_iter_new_wf_records(claude_home, wf_baseline))
+    expected_pipeline = Path(repo_root) / "workflows" / "pipeline.js"
+    expected_bundle_hash = pipeline_bundle_sha256(repo_root, expected_pipeline)
+    for _path, data in records:
+        if not record_identifies_repo_bundle(
+            data,
+            repo_root,
+            expected_pipeline=expected_pipeline,
+            expected_bundle_hash=expected_bundle_hash,
+        ):
+            script_path, _workflow_name, _script = workflow_record_fields(data)
+            reason = workflow_record_identity_reason(
+                data,
+                repo_root,
+                expected_pipeline=expected_pipeline,
+                expected_bundle_hash=expected_bundle_hash,
+            )
+            if script_path:
+                return f"scriptPath {script_path!r} is not repo workflows/pipeline.js ({reason})"
+            return f"Workflow record has no scriptPath ({reason})"
+    return None
+
+
+def _find_payload(output_dir):
+    base = Path(output_dir)
+    if not base.exists():
+        return None
+    direct = base / "post-review-payload.json"
+    if direct.is_file() and not _is_superseded(direct):
+        return direct
+    matches = sorted(
+        path
+        for path in base.rglob("post-review-payload.json")
+        if not _is_superseded(path)
+    )
+    return matches[0] if matches else None
+
+
+def _fail_reason(returncode, envelope):
+    if envelope is None:
+        return "no_envelope"
+    if envelope.get("is_error"):
+        # subtype alone can read "success" on a mid-response API error; keep both.
+        return "is_error({})".format(envelope.get("subtype") or "unknown")
+    if returncode != 0:
+        return f"exit_{returncode}"
+    return "failed"
+
+
+def _claude_version(claude_bin):
+    """Return the child ``claude`` CLI version as ``(major, minor, patch)``, or None.
+
+    Runs ``claude --version`` and parses the first ``N.N.N`` it prints (real output is
+    ``2.1.154 (Claude Code)``). Any launch/parse failure yields None -- the caller treats
+    an unreadable version as "cannot confirm v3 support" and fails the run rather than
+    guessing which pipeline the CLI can honor.
+    """
+    try:
+        out = subprocess.run(
+            [claude_bin, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = _VERSION_RE.search((out.stdout or "") + (out.stderr or ""))
+    if not m:
+        return None
+    return tuple(int(g) for g in m.groups())
+
+
+def _fmt_version(version):
+    return ".".join(str(part) for part in version) if version else "unknown"
+
+
+def _v3_preflight(claude_bin):
+    """Return a failure reason when the child CLI cannot drive v3, else None.
+
+    v3 dispatches its pipeline through the Workflow tool, first exposed in Claude Code
+    ``2.1.154`` (``V3_MIN_CLAUDE_VERSION``). An older -- or unreadable -- CLI cannot honor
+    the v3 SKILL.md, so the caller marks the PR ``invalid`` (never scored) with this reason
+    instead of running a degraded review or deadlocking.
+    """
+    required = _fmt_version(V3_MIN_CLAUDE_VERSION)
+    version = _claude_version(claude_bin)
+    if version is None:
+        return (
+            f"v3_workflow_unsupported: claude --version unreadable, need >= {required}"
+        )
+    if version < V3_MIN_CLAUDE_VERSION:
+        return f"v3_workflow_unsupported: claude {_fmt_version(version)} < required {required}"
+    return None
+
+
+def pinned_cli(run_dir):
+    """Use the manifest pin after rechecking it at the final spend boundary."""
+    from bench.runner.validity import measurement_context, recheck_cli
+
+    path = Path(run_dir) / "run.json"
+    manifest = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if manifest.get("measurement_window"):
+        fingerprint = measurement_context(manifest)
+        recheck_cli(fingerprint)
+        return fingerprint.controls.cli_realpath
+    return None
+
+
+def invoke_review(
+    worktree,
+    pr,
+    run_dir,
+    timeout_s=1800,
+    tool="deep-review-v3",
+    child_model="inherit",
+    child_auth=API_AUTH_MODE,
+):
+    """Run the headless review for one PR and classify the outcome.
+
+    ``tool`` selects the pipeline label and gates the v3 preflight: a ``deep-review-v3``
+    run first asserts the child CLI is new enough to expose the Workflow tool (see
+    ``_v3_preflight``) and returns ``invalid`` if not; ``deep-review-v2`` skips that check.
+    The invocation itself is unchanged either way -- the ``--plugin-dir`` repo is whichever
+    pipeline version is checked out; ``tool`` records/gates, it does not fork the command.
+
+    ``child_model`` pins the child orchestrator session's model: any value other than
+    ``inherit`` appends ``--model <child_model>`` to the ``claude`` command; ``inherit``
+    leaves the child to its own default. The review agents' models are unaffected -- they
+    are set by the pipeline's own policy, not this flag.
+
+    ``child_auth`` is passed straight to ``build_env``, which owns the entire credential
+    decision -- it is never re-derived or defaulted here.
+
+    Returns an :class:`InvokeResult`. The isolated ``HOME``/``CLAUDE_CONFIG_DIR`` has no
+    allowlist and no user, so ``--dangerously-skip-permissions`` plus the pinned context
+    is the containment boundary; any prompt would deadlock, which the watchdog + scan catch.
+    """
+    worktree = Path(worktree).resolve()
+    run_dir = Path(run_dir)
+    number = _pr_number(pr)
+
+    env = build_env(pr, run_dir, os.environ, child_auth=child_auth)
+    # Belt-and-suspenders: also trust the exact worktree we will cd into, in case run.py
+    # placed it somewhere other than the build_env-derived convention path.
+    _seed_trust(Path(env["CLAUDE_CONFIG_DIR"]), worktree)
+
+    pr_dir = run_dir / pr_dir_name(pr)
+    pr_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = pr_dir / "raw.json"
+
+    claude_bin = pinned_cli(run_dir) or shutil.which(
+        "claude", path=env.get("PATH") or os.environ.get("PATH")
+    )
+    if not claude_bin:
+        return InvokeResult(
+            "failed", raw_json_path=str(raw_path), reason="claude_not_found"
+        )
+
+    # v3 preflight: the pipeline runs through the Workflow tool (Claude Code >= 2.1.154).
+    # An older/unreadable CLI cannot honor the v3 skill, so fail the PR invalid (never
+    # scored) with a clear reason rather than silently degrading. v2 needs no such gate.
+    if tool == "deep-review-v3":
+        reason = _v3_preflight(claude_bin)
+        if reason:
+            return InvokeResult("invalid", raw_json_path=str(raw_path), reason=reason)
+
+    # Snapshot the plugin repo's pre-run dirty state so the post-run integrity guard flags
+    # only NEW mutations the child introduced — never a pre-existing local edit.
+    baseline_dirty = _plugin_dirty_paths(REPO_ROOT) or frozenset()
+    claude_home = Path(env["CLAUDE_CONFIG_DIR"]).parent
+    wf_baseline = snapshot_workflow_records(claude_home)
+
+    cmd = [
+        claude_bin,
+        "-p",
+        f"/{SKILL_COMMAND} {number}",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--plugin-dir",
+        str(REPO_ROOT),
+    ]
+    # Pin the child orchestrator session's model unless inheriting its default. The review
+    # agents' models are set by the pipeline policy and are unaffected by this flag.
+    if child_model != "inherit":
+        cmd += ["--model", child_model]
+
+    with open(raw_path, "w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(worktree),
+            env=env,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            with suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+            # A killed child may have left the plugin repo dirty; reset so the NEXT PR
+            # starts from a clean plugin (this PR is already invalid via 'timeout').
+            leftover = _plugin_mutations(REPO_ROOT, baseline_dirty)
+            if leftover:
+                _reset_plugin_repo(REPO_ROOT, leftover)
+                print(
+                    "PLUGIN MUTATED BY CHILD (timed-out PR {}) — reset {}: {}".format(
+                        number, REPO_ROOT, ", ".join(p for _s, p in leftover)
+                    ),
+                    file=sys.stderr,
+                )
+            return InvokeResult(
+                "timeout", raw_json_path=str(raw_path), reason="watchdog_timeout"
+            )
+
+    raw_text = raw_path.read_text(errors="replace", encoding="utf-8")
+    envelope = parse_result_envelope(raw_text)
+    # The receipt may live in stdout, the envelope .result, or a report .md — collected
+    # into pr_dir by run.py, or still in the shared output dir at echo-check time.
+    report_dirs = (env.get("CODE_GAUNTLET_OUTPUT_DIR"), str(pr_dir))
+
+    # 0) Plugin-repo integrity (measurement guard): a child that self-healed the plugin
+    #    mid-run leaves REPO_ROOT dirty and contaminates this and every later PR. Reset
+    #    the repo and invalidate BEFORE any outcome gate — the run is no longer trustworthy.
+    mutations = _plugin_mutations(REPO_ROOT, baseline_dirty)
+    if mutations:
+        _reset_plugin_repo(REPO_ROOT, mutations)
+        print(
+            "PLUGIN MUTATED BY CHILD during PR {} — invalidated + reset {}: {}".format(
+                number, REPO_ROOT, ", ".join(p for _s, p in mutations)
+            ),
+            file=sys.stderr,
+        )
+        costs = parse_costs(envelope or {})
+        return InvokeResult(
+            "invalid",
+            cost_usd=costs["cost_usd"],
+            per_model=costs["per_model"],
+            echo_ok=_echo_ok(raw_text, envelope, report_dirs),
+            raw_json_path=str(raw_path),
+            reason="plugin_mutated_by_child",
+        )
+
+    # 1) AskUserQuestion (safety) wins even over a clean-looking envelope.
+    if _has_askuserquestion(raw_text, envelope):
+        return InvokeResult(
+            "invalid",
+            echo_ok=_echo_ok(raw_text, envelope, report_dirs),
+            raw_json_path=str(raw_path),
+            reason="askuserquestion_detected",
+        )
+
+    costs = parse_costs(envelope or {})
+    cost_usd = costs["cost_usd"]
+    per_model = costs["per_model"]
+
+    # 2) Process/tool failure -> failed (trust nothing else on a failed run).
+    if envelope is None or proc.returncode != 0 or envelope.get("is_error"):
+        return InvokeResult(
+            "failed",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=_echo_ok(raw_text, envelope, report_dirs),
+            raw_json_path=str(raw_path),
+            reason=_fail_reason(proc.returncode, envelope),
+        )
+
+    # 2b) Background-task kill: the Phase 3 Workflow ran detached and the CLI terminated it
+    #     at the background-wait ceiling before Phase 8 could deliver. The echo receipt and
+    #     payload are then absent for THIS reason, not a config mismatch -- label it distinctly
+    #     so the failure isn't conflated with a genuine echo/config problem. Invalid (unscored).
+    if _workflow_backgrounded(raw_text):
+        return InvokeResult(
+            "invalid",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=_echo_ok(raw_text, envelope, report_dirs),
+            raw_json_path=str(raw_path),
+            reason="workflow_backgrounded",
+        )
+
+    # 2c) Pipeline return envelope: the Workflow record is the durable source of the
+    #     pipeline's own result, including failures that produce no report or payload.
+    #     Parsed once here and shared with the identity gate (4).
+    wf_records = list(_iter_new_wf_records(claude_home, wf_baseline))
+    pipeline_failure = _workflow_failure(
+        claude_home,
+        wf_baseline,
+        REPO_ROOT,
+        env["CODE_GAUNTLET_OUTPUT_DIR"],
+        records=wf_records,
+    )
+    if pipeline_failure:
+        reason, error_text = pipeline_failure
+        print(
+            f"PIPELINE FAILURE during PR {number} — {reason}: {error_text[:200]}",
+            file=sys.stderr,
+        )
+        return InvokeResult(
+            "failed",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=_echo_ok(raw_text, envelope, report_dirs),
+            raw_json_path=str(raw_path),
+            reason=reason,
+        )
+
+    # 3) Config receipt (accepted from stdout, the .result envelope, or a report .md).
+    echo_ok = _echo_ok(raw_text, envelope, report_dirs)
+    if not echo_ok and not any(
+        _iter_new_wf_paths(Path(env["CLAUDE_CONFIG_DIR"]), wf_baseline)
+    ):
+        for receipt_text in _transcript_bash_results(
+            env["CLAUDE_CONFIG_DIR"], worktree, envelope
+        ):
+            if not _echo_ok(receipt_text):
+                continue
+            receipt = extract_identity_receipt(receipt_text)
+            if receipt and not _identity_mismatch(receipt, REPO_ROOT):
+                return InvokeResult(
+                    "failed",
+                    cost_usd=cost_usd,
+                    per_model=per_model,
+                    echo_ok=True,
+                    raw_json_path=str(raw_path),
+                    reason="pre_workflow_stop",
+                )
+    if not echo_ok:
+        return InvokeResult(
+            "invalid",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=False,
+            raw_json_path=str(raw_path),
+            reason="config_echo_mismatch",
+        )
+
+    # 4) Plugin identity receipt: echo + new Workflow records must identify this
+    #    checkout before the run can score.
+    identity_err = _check_plugin_identity(
+        raw_text,
+        envelope,
+        report_dirs,
+        claude_home=claude_home,
+        wf_baseline=wf_baseline,
+        repo_root=REPO_ROOT,
+        records=wf_records,
+    )
+    if identity_err:
+        print(
+            f"PLUGIN IDENTITY MISMATCH during PR {number} — invalidated: {identity_err}",
+            file=sys.stderr,
+        )
+        return InvokeResult(
+            "invalid",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=True,
+            raw_json_path=str(raw_path),
+            reason="plugin_identity_mismatch",
+        )
+
+    # 5) Dry-run payload (the scored candidate set).
+    payload_path = _find_payload(env["CODE_GAUNTLET_OUTPUT_DIR"])
+    delivery = env.get("CODE_GAUNTLET_DELIVERY", "")
+    if payload_path is None and "pr_comments" in [
+        d.strip() for d in delivery.split(",")
+    ]:
+        return InvokeResult(
+            "failed",
+            cost_usd=cost_usd,
+            per_model=per_model,
+            echo_ok=echo_ok,
+            raw_json_path=str(raw_path),
+            reason="no_payload",
+        )
+
+    return InvokeResult(
+        "ok",
+        cost_usd=cost_usd,
+        per_model=per_model,
+        echo_ok=echo_ok,
+        payload_path=str(payload_path) if payload_path else None,
+        raw_json_path=str(raw_path),
+    )

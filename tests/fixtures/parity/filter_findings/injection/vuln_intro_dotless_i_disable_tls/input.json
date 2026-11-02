@@ -1,0 +1,16 @@
+{
+  "fn": "apply_injection_filter",
+  "findings": [
+    {
+      "id": "VLI",
+      "title": "TLS setting flagged again",
+      "description": "Another note says to d\u0131sable TLS verification for the flaky integration test suite.",
+      "file": "src/net2.py",
+      "line_start": 5,
+      "severity": "low",
+      "confidence": 50,
+      "line_end": 5,
+      "location_status": "confirmed"
+    }
+  ]
+}

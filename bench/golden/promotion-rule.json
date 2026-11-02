@@ -1,0 +1,17 @@
+{
+  "kind": "wave",
+  "profile": "core",
+  "margin_pp": 7,
+  "nonmini_margin_pp": 0,
+  "initial_runs": 3,
+  "extension_runs": 3,
+  "stability_min_runs": 3,
+  "stable_loss_min": 2,
+  "stage_alpha": 0.0294,
+  "bootstrap": {
+    "draws": 10000,
+    "seed": 0,
+    "alpha": 0.05
+  },
+  "frozen": true
+}

@@ -1,0 +1,44 @@
+{
+  "findings": [
+    {
+      "agent": "bug-detector",
+      "confidence": 90,
+      "description": "d1",
+      "dimension": "bug",
+      "file": "i.py",
+      "id": "C7",
+      "line_start": 40,
+      "severity": "high",
+      "title": "t7",
+      "line_end": 40,
+      "location_status": "confirmed"
+    },
+    {
+      "agent": "bug-detector",
+      "confidence": 60,
+      "description": "d2",
+      "dimension": "bug",
+      "file": "i.py",
+      "id": "C8",
+      "line_start": 41,
+      "severity": "medium",
+      "title": "t8",
+      "line_end": 41,
+      "location_status": "confirmed"
+    },
+    {
+      "agent": "code-simplifier",
+      "confidence": 95,
+      "description": "a very long description here for tiebreak purposes maybe",
+      "dimension": "convention",
+      "file": "i.py",
+      "id": "C9",
+      "line_start": 42,
+      "severity": "low",
+      "title": "t9",
+      "line_end": 42,
+      "location_status": "confirmed"
+    }
+  ],
+  "fn": "consolidate_cross_agent"
+}

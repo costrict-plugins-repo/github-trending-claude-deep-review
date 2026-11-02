@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "agent": "bug-detector",
+      "confidence": 90,
+      "description": "d1",
+      "dimension": "bug",
+      "file": "j.py",
+      "id": "C10",
+      "line_start": 50,
+      "severity": "high",
+      "title": "t10",
+      "line_end": 50,
+      "location_status": "confirmed"
+    },
+    {
+      "agent": "code-simplifier",
+      "confidence": 95,
+      "description": "a description with no id field present at all for immunity test",
+      "dimension": "convention",
+      "file": "j.py",
+      "line_start": 51,
+      "severity": "low",
+      "title": "t11",
+      "line_end": 51,
+      "location_status": "confirmed"
+    }
+  ],
+  "fn": "consolidate_cross_agent"
+}

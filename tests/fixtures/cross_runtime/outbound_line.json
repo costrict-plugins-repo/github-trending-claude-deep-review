@@ -1,0 +1,2603 @@
+{
+  "algorithm": "outbound_line",
+  "cases": [
+    {
+      "id": "empty",
+      "input": "",
+      "expected": ""
+    },
+    {
+      "id": "email",
+      "input": "Contact dev@example.com for details.",
+      "expected": "Contact dev@example.com for details."
+    },
+    {
+      "id": "html",
+      "input": "<dev@example.com>",
+      "expected": "&lt;dev@example.com>"
+    },
+    {
+      "id": "link_destination",
+      "input": "[profile](https://x.test/@user)",
+      "expected": "[profile](https://x.test/\uff20user)"
+    },
+    {
+      "id": "inline_code",
+      "input": "code `@inside <tag> &copy;` and @outside",
+      "expected": "code `\uff20inside \uff1ctag> &copy;` and \uff20outside"
+    },
+    {
+      "id": "unclosed_code",
+      "input": "open `@outside <tag>",
+      "expected": "open \\`\uff20outside &lt;tag>"
+    },
+    {
+      "id": "unequal_delimiter",
+      "input": "`a`` @inside",
+      "expected": "\\`a\\`\\` \uff20inside"
+    },
+    {
+      "id": "named_reference",
+      "input": "&amp; &#64; &#60;table",
+      "expected": "&amp; \uff20 &lt;table"
+    },
+    {
+      "id": "literal_comparisons",
+      "input": "plain a < b; x <= y; <3; <tag>",
+      "expected": "plain a < b; x <= y; <3; &lt;tag>"
+    },
+    {
+      "id": "literal_underscore_mention",
+      "input": "Notify @alice and _@team; a@domain.test; https://x/@user; <table>",
+      "expected": "Notify \uff20alice and _\uff20team; a@domain.test; https://x/\uff20user; &lt;table>"
+    },
+    {
+      "id": "literal_entities",
+      "input": "&amp; &lt; &gt; &quot; &copy; &#64; &#60;table",
+      "expected": "&amp; &lt; &gt; &quot; &copy; \uff20 &lt;table"
+    },
+    {
+      "id": "literal_broken_link",
+      "input": "[profile](broken@leehopper",
+      "expected": "[profile](broken@leehopper"
+    },
+    {
+      "id": "literal_broken_nested_link",
+      "input": "[a](x(y)`z) @leehopper <ins>q</ins> `",
+      "expected": "[a](x(y)`z) \uff20leehopper \uff1cins>q\uff1c/ins> `"
+    },
+    {
+      "id": "numeric_ascii_digits",
+      "input": "&#64; and &#x40;",
+      "expected": "\uff20 and \uff20"
+    },
+    {
+      "id": "numeric_non_ascii_digits",
+      "input": "&#\u0666\u0664; and &#x\u0664\u0660;",
+      "expected": "&#\u0666\u0664; and &#x\u0664\u0660;"
+    },
+    {
+      "id": "tick_markup_bridge",
+      "input": "`<`q",
+      "expected": "`\uff1c`q"
+    },
+    {
+      "id": "span_backslash_final_closer",
+      "input": "left `danger <table> @user\\`",
+      "expected": "left `danger \uff1ctable> \uff20user\\`",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "span_backslash_middle_closer",
+      "input": "left `protected\\` <table> @inside` right @outside",
+      "expected": "left `protected\\` &lt;table> \uff20inside\\` right \uff20outside",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "span_destination_closer",
+      "input": "`a](b`c) @leehopper <ins>x</ins> `",
+      "expected": "`a](b`c) \uff20leehopper &lt;ins>x&lt;/ins> \\`"
+    },
+    {
+      "id": "span_http_url",
+      "input": "see http://x/a`b @leehopper <ins>q</ins> `",
+      "expected": "see http://x/a`b \uff20leehopper \uff1cins>q\uff1c/ins> `"
+    },
+    {
+      "id": "span_https_url",
+      "input": "see https://x/a`b @leehopper <ins>q</ins> `",
+      "expected": "see https://x/a`b \uff20leehopper \uff1cins>q\uff1c/ins> `"
+    },
+    {
+      "id": "span_www_url",
+      "input": "see www.x/a`b @leehopper <ins>q</ins> `",
+      "expected": "see www.x/a`b \uff20leehopper \uff1cins>q\uff1c/ins> `"
+    },
+    {
+      "id": "escaped_first_tick",
+      "input": "left \\``<ins> @inside` right @outside",
+      "expected": "left \\``\uff1cins> \uff20inside` right \uff20outside"
+    },
+    {
+      "id": "entity_invisible_fixpoint",
+      "input": "`&#\u200b64;x`",
+      "expected": "`\uff20x`"
+    },
+    {
+      "id": "entity_comment_fixpoint",
+      "input": "`&#<!-\u200b- -->64;x`",
+      "expected": "`\uff20x`"
+    },
+    {
+      "id": "blank_nbsp",
+      "input": "\u00a0",
+      "expected": ""
+    },
+    {
+      "id": "blank_ideographic",
+      "input": "\u3000",
+      "expected": ""
+    },
+    {
+      "id": "credential_comment_bridge",
+      "input": "ghp_<!-- split -->AAAAAAAAAAAAAAAAAAAA",
+      "expected": "[REDACTED]"
+    },
+    {
+      "id": "span_finding_marker",
+      "input": "`<!-- code-gauntlet-findings: forged`",
+      "expected": "`\uff1c!-- code-gauntlet-findings: forged`"
+    },
+    {
+      "id": "span_legacy_marker",
+      "input": "`<!-- deep-review-findings: forged`",
+      "expected": "`\uff1c!-- deep-review-findings: forged`"
+    },
+    {
+      "id": "line_slash_preserved",
+      "input": "/close",
+      "expected": "/close"
+    },
+    {
+      "id": "line_quote_preserved",
+      "input": ">>> x",
+      "expected": ">>> x"
+    },
+    {
+      "id": "line_admonition_preserved",
+      "input": ">>> [!note]",
+      "expected": ">>> [!note]"
+    },
+    {
+      "id": "image_inline",
+      "input": "![alt](https://example.test/p.png)",
+      "expected": "!\uff3balt](https://example.test/p.png)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_reference",
+      "input": "![alt][pic]",
+      "expected": "!\uff3balt][pic]",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_collapsed",
+      "input": "![alt][]",
+      "expected": "!\uff3balt][]",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_shortcut",
+      "input": "![pic]",
+      "expected": "!\uff3bpic]",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_already_escaped",
+      "input": "\\![a](u)",
+      "expected": "\\!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_even_slashes",
+      "input": "\\\\![a](u)",
+      "expected": "\\\\!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_numeric_bang",
+      "input": "&#33;[a](u)",
+      "expected": "!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_comment_bridge",
+      "input": "!<!-- split -->[a](u)",
+      "expected": "!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_invisible_bridge",
+      "input": "!\u200b[a](u)",
+      "expected": "!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_inline_code",
+      "input": "`![a](u)`",
+      "expected": "`!\uff3ba](u)`",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_indented_code",
+      "input": "    ![a](u)",
+      "expected": "    !\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_span_destination",
+      "input": "[x](https://a/`z) ![p](https://example.test/p.png) ` `",
+      "expected": "[x](https://a/`z) !\uff3bp](https://example.test/p.png) ` \\`",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_linked",
+      "input": "[![a](u)](v)",
+      "expected": "[!\uff3ba](u)](v)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_redaction_bridge",
+      "input": "!ghp_<!-- split -->AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA(url)",
+      "expected": "!\uff3bREDACTED](url)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "reference_definition",
+      "input": "[critical]: u",
+      "expected": "[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_indent_three",
+      "input": "   [critical]: u",
+      "expected": "   [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_indented_code",
+      "input": "    [critical]: u",
+      "expected": "    [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_tab",
+      "input": "\t[critical]: u",
+      "expected": "\t[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_quote",
+      "input": "> [critical]: u",
+      "expected": "> [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_list",
+      "input": "- [critical]: u",
+      "expected": "- [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_ordered_list",
+      "input": "1. [critical]: u",
+      "expected": "1. [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_quote_list",
+      "input": "> - [critical]: u",
+      "expected": "> - [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_wide_prefix",
+      "input": " >+12)-*[critical]: u",
+      "expected": " >+12)-*[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_footnote",
+      "input": "[^n]: note",
+      "expected": "\uff3b^n]\\: note",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_footnote_nested",
+      "input": "[^1]: [critical]: u",
+      "expected": "\uff3b^1]\\: [critical]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_escaped_label",
+      "input": "[crit\\]ical]: u",
+      "expected": "[crit\\]ical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_even_label_slashes",
+      "input": "[critical\\\\]: u",
+      "expected": "[critical\\\\]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_escaped_inner_bracket",
+      "input": "[crit\\[ical]: u",
+      "expected": "[crit\\[ical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_already_escaped",
+      "input": "[critical]\\: u",
+      "expected": "[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_escaped_opener",
+      "input": "\\[critical]: u",
+      "expected": "\\[critical]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_spaced_colon",
+      "input": "[critical] : u",
+      "expected": "[critical] : u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_midline",
+      "input": "see [note]: x",
+      "expected": "see [note]: x",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_nondefinition",
+      "input": "[critical] ordinary prose",
+      "expected": "[critical] ordinary prose",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_empty_label",
+      "input": "[]: u",
+      "expected": "[]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_blank_label",
+      "input": "[ \t ]: u",
+      "expected": "[ \t ]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_nested_bracket",
+      "input": "[crit[ical]: u",
+      "expected": "[crit[ical]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_escaped_closer",
+      "input": "[critical\\]: u",
+      "expected": "[critical\\]: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_inline_code",
+      "input": "`[critical]: u`",
+      "expected": "`[critical]\\: u`",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression",
+      "note": "A backtick prefix cannot certify renderer code."
+    },
+    {
+      "id": "reference_label_span",
+      "input": "[crit`ical`]: u",
+      "expected": "[crit`ical`]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_numeric_bracket",
+      "input": "&#91;critical&#93;&#58; u",
+      "expected": "[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_comment_bridge",
+      "input": "[critical]<!-- split -->: u",
+      "expected": "[critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_redaction_bridge",
+      "input": "ghp_<!-- split -->AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: url",
+      "expected": "[REDACTED]\\: url",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_relative",
+      "input": "[critical]: /relative \"title\"",
+      "expected": "[critical]\\: /relative \"title\"",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_angle_title",
+      "input": "[critical]: <https://e.test/x> \"title\"",
+      "expected": "[critical]\\: &lt;https://e.test/x> \"title\"",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_max_label",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_overlong_label",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_overlong_escaped_label",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\!]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\!]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_flattened_label",
+      "input": "[critical\n]: u",
+      "expected": "[critical ]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_astral_label",
+      "input": "[\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00]: u",
+      "expected": "[\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00]\\: u",
+      "kind": "regression",
+      "rule_ids": [
+        "prose.reference_definition"
+      ]
+    },
+    {
+      "id": "reference_astral_limit",
+      "input": "[\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00]: u",
+      "expected": "[\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00]\\: u",
+      "kind": "regression",
+      "rule_ids": [
+        "prose.reference_definition"
+      ]
+    },
+    {
+      "id": "reference_tick_label_limit",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\`]\\: u",
+      "kind": "regression",
+      "rule_ids": [
+        "prose.reference_definition"
+      ]
+    },
+    {
+      "id": "reference_1001_label",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_very_long_label",
+      "input": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]: u",
+      "expected": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression",
+      "note": "An unbounded scan must escape long labels without excessive backtracking."
+    },
+    {
+      "id": "reference_deflist_colon",
+      "input": ": [critical]: u",
+      "expected": ": [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_deflist_tilde",
+      "input": "~ [critical]: u",
+      "expected": "~ [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "reference_parenthesized_prefix",
+      "input": "(1) [critical]: u",
+      "expected": "(1) [critical]\\: u",
+      "rule_ids": [
+        "prose.reference_definition"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "wikilink_bare_opener",
+      "input": "[[a",
+      "expected": "[\uff3ba",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ],
+      "note": "A closer in another composed field must not complete an unescaped opener."
+    },
+    {
+      "id": "wikilink_overlapping_openers",
+      "input": "[[[a",
+      "expected": "[\uff3b\uff3ba",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ],
+      "note": "Original neighbours turn [[[ into [ followed by two U+FF3B characters."
+    },
+    {
+      "id": "wikilink_image",
+      "input": "[[https://example.test/p.png]]",
+      "expected": "[\uff3bhttps://example.test/p.png]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_alt_image",
+      "input": "[[alt|https://example.test/p.svg]]",
+      "expected": "[\uff3balt|https://example.test/p.svg]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_shell",
+      "input": "[[ -f /etc/x ]]",
+      "expected": "[\uff3b -f /etc/x ]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_array",
+      "input": "[[1, 2], [3]]",
+      "expected": "[\uff3b1, 2], [3]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "note": "Every wikilink opener is contained even when inner brackets interrupt pairing.",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_already_escaped",
+      "input": "\\[[a]]",
+      "expected": "\\[\uff3ba]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_even_slashes",
+      "input": "\\\\[[a]]",
+      "expected": "\\\\[\uff3ba]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_entity_bridge",
+      "input": "&#91;&#91;a]]",
+      "expected": "[\uff3ba]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_redaction_bridge",
+      "input": "[ghp_<!-- split -->AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]]",
+      "expected": "[\uff3bREDACTED]]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_escaped_inner_bracket",
+      "input": "[[a\\[b]]",
+      "expected": "[\uff3ba\\[b]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_inner_closing_bracket",
+      "input": "[[a]b]]",
+      "expected": "[\uff3ba]b]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_gitlab_redaction_bridge",
+      "input": "[glpat-<!-- split -->BBBBBBBBBBBBBBBBBBBB]]",
+      "expected": "[\uff3bREDACTED]]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "comment_removal_before_decode",
+      "input": "<!-<!--x-->- a --&#6<!--y-->2; b -->",
+      "expected": "2; b -->",
+      "operations": [
+        "prose",
+        "line"
+      ],
+      "note": "Removal forms a comment that must disappear before another entity decode shortens it."
+    },
+    {
+      "id": "wikilink_inline_code",
+      "input": "`[[a]]`",
+      "expected": "`[\uff3ba]]`",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_span_destination",
+      "input": "[x](https://a/`z) [[https://example.test/p.png]] `",
+      "expected": "[x](https://a/`z) [\uff3bhttps://example.test/p.png]] `",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_span_boundary",
+      "input": "!`[a](u)`",
+      "expected": "!`[a](u)`",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "control",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_span_boundary",
+      "input": "[`[a]]`",
+      "expected": "[`[a]]`",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "control",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_unclosed_span",
+      "input": "`![a](u)",
+      "expected": "\\`!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_unclosed_span",
+      "input": "`[[a]]",
+      "expected": "\\`[\uff3ba]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_overlapping_code",
+      "input": "`[[[a`",
+      "expected": "`[\uff3b\uff3ba`",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "openers_code_backslashes",
+      "input": "`\\[[a]]/\\![a](u)`",
+      "expected": "`\\[\uff3ba]]/\\!\uff3ba](u)`",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_code_definition_fixpoint",
+      "input": "`[[a]: u`",
+      "expected": "`[\uff3ba]\\: u`",
+      "rule_ids": [
+        "prose.wikilink",
+        "prose.reference_definition"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ],
+      "note": "Replacing the inner bracket completes a definition-shaped label; the colon rule must see the contained form."
+    },
+    {
+      "id": "image_plain",
+      "input": "![a](u)",
+      "expected": "!\uff3ba](u)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_plain",
+      "input": "[[u]]",
+      "expected": "[\uff3bu]]",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_triple",
+      "input": "[[[",
+      "expected": "[\uff3b\uff3b",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_backslash_split",
+      "input": "!\\[x](//example.test/p.png)",
+      "expected": "!\\\uff3bx](//example.test/p.png)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_backslash_then_link",
+      "input": "!\\[x](https://example.test/p.png)](a)",
+      "expected": "!\\\uff3bx](https://example.test/p.png)](a)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_named_lbrack",
+      "input": "!&lbrack;x](//example.test/p.png)",
+      "expected": "!\uff3bx](//example.test/p.png)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_named_lsqb",
+      "input": "!&lsqb;x](https://example.test/p.png)](a)",
+      "expected": "!\uff3bx](https://example.test/p.png)](a)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "image_named_excl",
+      "input": "&excl;&lbrack;x](//example.test/p.png)",
+      "expected": "!\uff3bx](//example.test/p.png)",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_backslash_split",
+      "input": "[\\[https://example.test/p.png]](a)",
+      "expected": "[\\\uff3bhttps://example.test/p.png]](a)",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_named_lbrack",
+      "input": "&lbrack;&lbrack;page&rsqb;&rsqb;(a)",
+      "expected": "[\uff3bpage]](a)",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_then_inline_link",
+      "input": "[[U]](a)",
+      "expected": "[\uff3bU]](a)",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_and_spaced_link",
+      "input": "[[page]] and [x](y z)",
+      "expected": "[\uff3bpage]] and [x](y z)",
+      "rule_ids": [
+        "prose.wikilink"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "openers_split_inline_code",
+      "input": "`!\\[a](u) [\\[u]]`",
+      "expected": "`!\\\uff3ba](u) [\\\uff3bu]]`",
+      "rule_ids": [
+        "prose.image"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ]
+    },
+    {
+      "id": "wikilink_prose_definition_fixpoint",
+      "input": "[[a]: u",
+      "expected": "[\uff3ba]\\: u",
+      "rule_ids": [
+        "prose.wikilink",
+        "prose.reference_definition"
+      ],
+      "kind": "regression",
+      "operations": [
+        "prose",
+        "line"
+      ],
+      "note": "Containing the inner bracket completes a label that needs the final colon pass."
+    },
+    {
+      "id": "A-mid",
+      "input": "before x [a]: //example.test/SENT](a b) after",
+      "expected": "before x [a]\uff1a //example.test/SENT](a b) after"
+    },
+    {
+      "id": "A-start",
+      "input": "[a]: //e/SENT](a b) after",
+      "expected": "[a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-depth2",
+      "input": "p [x [a]: //e/SENT](a b) after",
+      "expected": "p [x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-depth3",
+      "input": "p [w [x [a]: //e/SENT](a b) after",
+      "expected": "p [w [x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-depth4",
+      "input": "p [v [w [x [a]: //e/SENT](a b) after",
+      "expected": "p [v [w [x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-escaped-outer",
+      "input": "p \\[w [x [a]: //e/SENT](a b) after",
+      "expected": "p \\[w [x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-footnote",
+      "input": "x [^a]: note SENT](a b) after",
+      "expected": "x \uff3b^a]\uff1a note SENT](a b) after"
+    },
+    {
+      "id": "A-slashes",
+      "input": "x [a]\\\\: //e/SENT](a b) after",
+      "expected": "x [a]\\\\\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-close",
+      "input": "p [a\\\\]b]: //e/SENT](c d) after",
+      "expected": "p [a\\\\]b]\uff1a //e/SENT](c d) after"
+    },
+    {
+      "id": "A-trigger-escape",
+      "input": "x [a]: //e/SENT]\\(a b) after",
+      "expected": "x [a]\uff1a //e/SENT]\\(a b) after"
+    },
+    {
+      "id": "A-trigger-no-space",
+      "input": "x [a]: //e/SENT](ab) after",
+      "expected": "x [a]\uff1a //e/SENT](ab) after"
+    },
+    {
+      "id": "A-aliases",
+      "input": "x &lbrack;a&rbrack;&colon; //e/SENT&rsqb;&lpar;a b&rpar; after",
+      "expected": "x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-bsol",
+      "input": "p [a&bsol;\\]b]: //e/SENT](c d) after",
+      "expected": "p [a\\\\]b]\uff1a //e/SENT](c d) after"
+    },
+    {
+      "id": "A-numeric",
+      "input": "x &#91;a&#93;&#58; //e/SENT](a b) after",
+      "expected": "x [a]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-redaction",
+      "input": "x ghp_\u0041AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: //e/SENT](a b) after",
+      "expected": "x [REDACTED]\uff1a //e/SENT](a b) after"
+    },
+    {
+      "id": "A-two",
+      "input": "x [a]: u](a b) [b]: v](c d) q",
+      "expected": "x [a]\uff1a u](a b) [b]\uff1a v](c d) q"
+    },
+    {
+      "id": "A-code-control",
+      "input": "`x [a]: SENT](a b)`",
+      "expected": "`x [a]\uff1a SENT](a b)`",
+      "note": "A trigger on the physical line forces fullwidth colons inside inline code too."
+    },
+    {
+      "id": "A-label-control",
+      "input": "see [note]: https://example.test/x",
+      "expected": "see [note]: https://example.test/x"
+    },
+    {
+      "id": "A-link-control",
+      "input": "see [note](https://example.test/x)",
+      "expected": "see [note](https://example.test/x)"
+    },
+    {
+      "id": "A-trigger-control-close",
+      "input": "x [a]: u][a b] q",
+      "expected": "x [a]: u][a b] q"
+    },
+    {
+      "id": "A-trigger-control-space",
+      "input": "x [a]: u] (a b) q",
+      "expected": "x [a]: u] (a b) q"
+    },
+    {
+      "id": "A-trigger-control-two-slashes",
+      "input": "x [a]: u]\\\\(a b) q",
+      "expected": "x [a]: u]\\\\(a b) q"
+    },
+    {
+      "id": "A-title-line",
+      "input": "[x]: u",
+      "expected": "[x]\\: u"
+    },
+    {
+      "id": "A-title-triggered",
+      "input": "x [a]: u](a b)",
+      "expected": "x [a]\uff1a u](a b)"
+    },
+    {
+      "id": "F-line-control",
+      "input": "~~~ x",
+      "expected": "~~~ x"
+    },
+    {
+      "id": "A-split-label-flattened",
+      "input": "x [a\nb]: //e/SENT\n](a b) after",
+      "expected": "x [a b]\uff1a //e/SENT ](a b) after"
+    },
+    {
+      "id": "A-split-destination-flattened",
+      "input": "x [a]: //e/\nSENT](a b) after",
+      "expected": "x [a]\uff1a //e/ SENT](a b) after"
+    },
+    {
+      "id": "D-overlap1",
+      "input": "<!-->tail",
+      "expected": "&lt;!-->tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-overlap2",
+      "input": "<!--->tail",
+      "expected": "&lt;!--->tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-empty",
+      "input": "<!---->tail",
+      "expected": "tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-late1",
+      "input": "<!-->x-->y",
+      "expected": "y",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-late2",
+      "input": "<!--->x-->y",
+      "expected": "y",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-restored-overlap",
+      "input": "<!-<!--x-->->tail",
+      "expected": "&lt;!-->tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "N1",
+      "input": "<!--&#38;#45;&#38;#45;&#38;#62;z-->tail",
+      "expected": "z-->tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "N2",
+      "input": "<!--x--\u200b>y-->z",
+      "expected": "y-->z",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "N3",
+      "input": "<!-<!--x-->- y --<!--z-->> w",
+      "expected": "> w",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-join",
+      "input": "&<!-- x -->#64;user",
+      "expected": "\uff20user",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-nested",
+      "input": "before <!-<!-- x -->- y --> after",
+      "expected": "before  after",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-unknown",
+      "input": "&amp;commat;team &unknown; a&b=2",
+      "expected": "&amp;commat;team &unknown; a&b=2",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-zero-dec",
+      "input": "&#0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000064;",
+      "expected": "\uff20",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-overflow-dec",
+      "input": "&#99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999;",
+      "expected": "",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "D-zero-hex",
+      "input": "&#x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040;",
+      "expected": "\uff20",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "T-suffix",
+      "input": "``a`b",
+      "expected": "\\``a`b",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "T-escaped",
+      "input": "\\``a`b",
+      "expected": "\\``a`b",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_amp_raw",
+      "input": "[&\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0](a b)hidden text",
+      "expected": "[&                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_amp_named",
+      "input": "[&&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;](a b)hidden text",
+      "expected": "[&                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_amp_long_named",
+      "input": "[&&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;](a b)hidden text",
+      "expected": "[&                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_lt_raw",
+      "input": "[<\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0](a b)hidden text",
+      "expected": "[<                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_lt_named",
+      "input": "[<&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;](a b)hidden text",
+      "expected": "[<                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_lt_long_named",
+      "input": "[<&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;](a b)hidden text",
+      "expected": "[<                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_gt_raw",
+      "input": "[>\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0](a b)hidden text",
+      "expected": "[>                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_gt_named",
+      "input": "[>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;](a b)hidden text",
+      "expected": "[>                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_gt_long_named",
+      "input": "[>&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;&NonBreakingSpace;](a b)hidden text",
+      "expected": "[>                        ](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_decimal",
+      "input": "[&&#160;](a b)hidden text",
+      "expected": "[&](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_hex",
+      "input": "[&&#xA0;](a b)hidden text",
+      "expected": "[&](a b)hidden text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "nbsp_nested_named",
+      "input": "[&&#38;nbsp;&#38;NonBreakingSpace;](a b)tail",
+      "expected": "[&  ](a b)tail",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_suffix_short",
+      "input": "]](``[x]:`",
+      "expected": "]](\\``[x]\uff1a`",
+      "operations": [
+        "line",
+        "prose"
+      ],
+      "note": "A trigger on the physical line forces fullwidth colons inside inline code too."
+    },
+    {
+      "id": "colon_suffix_long",
+      "input": "``x [a]: u](a b) tail`",
+      "expected": "\\``x [a]\uff1a u](a b) tail`",
+      "operations": [
+        "line",
+        "prose"
+      ],
+      "note": "A trigger on the physical line forces fullwidth colons inside inline code too."
+    },
+    {
+      "id": "footnote_slash_plain",
+      "input": "[^a\\]: hidden W1 text",
+      "expected": "\uff3b^a\\]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_bracket_plain",
+      "input": "[^x[a]: hidden W1 text",
+      "expected": "\uff3b^x[a]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_slash_list",
+      "input": "- [^a\\]: hidden W1 text",
+      "expected": "- \uff3b^a\\]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_bracket_list",
+      "input": "- [^x[a]: hidden W1 text",
+      "expected": "- \uff3b^x[a]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_slash_quote",
+      "input": "> [^a\\]: hidden W1 text",
+      "expected": "> \uff3b^a\\]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_bracket_quote",
+      "input": "> [^x[a]: hidden W1 text",
+      "expected": "> \uff3b^x[a]: hidden W1 text",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_control_space",
+      "input": "[^x y]:",
+      "expected": "\uff3b^x y]\\:",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_control_empty",
+      "input": "[^]:",
+      "expected": "\uff3b^]\\:",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "footnote_control_even_slashes",
+      "input": "[^x\\\\]:",
+      "expected": "\uff3b^x\\\\]\\:",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_footnote",
+      "input": "[^`]: The handler trusts `X-User` ...; see [docs](https://e.test/auth).",
+      "expected": "\uff3b^`]\uff1a The handler trusts `X-User\\` ...; see [docs](https://e.test/auth).",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_definition",
+      "input": "[`]: /u 'text ` ](x'",
+      "expected": "[`]\uff1a /u 'text ` ](x'",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_definition_list",
+      "input": "- [`]: /u 'text ` ](x'",
+      "expected": "- [`]\uff1a /u 'text ` ](x'",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_definition_quote",
+      "input": "> [`]: /u 'text ` ](x'",
+      "expected": "> [`]\uff1a /u 'text ` ](x'",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_code_backslashes",
+      "input": "`[a]\\\\: x` [d](u)",
+      "expected": "`[a]\\\\\uff1a x` [d](u)",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_destination",
+      "input": "See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "See [x](`) [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_link_title",
+      "input": "[x](u '`') See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "[x](u '`') See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_angle_destination",
+      "input": "[x](<`>) See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "[x](<`>) See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_bare_url",
+      "input": "https://e.test/` See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "https://e.test/` See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_www_url",
+      "input": "www.e.test/` See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "www.e.test/` See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_math",
+      "input": "$5`$ See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "$5`$ See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_display_math",
+      "input": "$$a`$$ See [x](`) [label W5]: //e/dest](a b) ` W6",
+      "expected": "$$a`$$ See [x](`) [label W5]\uff1a //e/dest](a b) \\` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_link_title_prefix",
+      "input": "[x](u '`') [label W5]: //e/dest](a b) ` W6",
+      "expected": "[x](u '`') [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_angle_destination_prefix",
+      "input": "[x](<`>) [label W5]: //e/dest](a b) ` W6",
+      "expected": "[x](<`>) [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_bare_url_prefix",
+      "input": "https://e.test/` [label W5]: //e/dest](a b) ` W6",
+      "expected": "https://e.test/` [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_www_url_prefix",
+      "input": "www.e.test/` [label W5]: //e/dest](a b) ` W6",
+      "expected": "www.e.test/` [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_math_prefix",
+      "input": "$5`$ [label W5]: //e/dest](a b) ` W6",
+      "expected": "$5`$ [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_tick_display_math_prefix",
+      "input": "$$a`$$ [label W5]: //e/dest](a b) ` W6",
+      "expected": "$$a`$$ [label W5]\uff1a //e/dest](a b) ` W6",
+      "operations": [
+        "line",
+        "prose"
+      ]
+    },
+    {
+      "id": "colon_three_triggered_occurrences",
+      "input": "x [a]: [b]: [c]: u](a b)",
+      "expected": "x [a]\uff1a [b]\uff1a [c]\uff1a u](a b)"
+    },
+    {
+      "id": "invisible_c0",
+      "input": "A\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\u000b\f\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001fB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_del",
+      "input": "A\u007fB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_c1",
+      "input": "A\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008a\u008b\u008c\u008d\u008e\u008f\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009a\u009b\u009c\u009d\u009e\u009fB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_soft_hyphen",
+      "input": "A\u00adB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_zero_width",
+      "input": "A\u200b\u200c\u200dB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_bom",
+      "input": "A\ufeffB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_word_joiner",
+      "input": "A\u2060B",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_bidi_embedding",
+      "input": "A\u202a\u202b\u202c\u202d\u202eB",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_bidi_isolates",
+      "input": "A\u2066\u2067\u2068\u2069B",
+      "expected": "AB"
+    },
+    {
+      "id": "invisible_cr",
+      "input": "A\rB",
+      "expected": "AB"
+    },
+    {
+      "id": "footnote_opener_backslash",
+      "input": "See [\\^The handler W1] tail W2",
+      "expected": "See \uff3b\\^The handler W1] tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_basic",
+      "input": "See [^The handler trusts X-User W1] tail W2",
+      "expected": "See \uff3b^The handler trusts X-User W1] tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_code_span",
+      "input": "See `[^The handler W1]` tail W2",
+      "expected": "See `\uff3b^The handler W1]` tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_hat_entity",
+      "input": "See [&Hat;The handler W1] tail W2",
+      "expected": "See \uff3b^The handler W1] tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_image",
+      "input": "See ![^The handler W1] tail W2",
+      "expected": "See !\uff3b^The handler W1] tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_nested_bracket",
+      "input": "[^The handler [x] W1 more W2] tail W3",
+      "expected": "\uff3b^The handler [x] W1 more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_spaced_control",
+      "input": "See [ ^The handler W1] tail W2",
+      "expected": "See [ ^The handler W1] tail W2",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "footnote_opener_two_line",
+      "input": "See [^The handler trusts X-User W1\nwithout verifying the token W2] tail W3",
+      "expected": "See \uff3b^The handler trusts X-User W1 without verifying the token W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_broken_code_span",
+      "input": "See `[^The handler W1\nmore W2]` tail W3",
+      "expected": "See `\uff3b^The handler W1 more W2]` tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_list",
+      "input": "- See [^The handler W1\n  more W2] tail W3",
+      "expected": "- See \uff3b^The handler W1   more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_quote",
+      "input": "> See [^The handler W1\n> more W2] tail W3",
+      "expected": "> See \uff3b^The handler W1 > more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_backslash_run",
+      "input": "See [\\\\\\^The handler W1\nmore W2] tail W3",
+      "expected": "See \uff3b\\\\\\^The handler W1 more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_wikilink",
+      "input": "See [[^The handler W1\nmore W2] tail W3",
+      "expected": "See [\uff3b^The handler W1 more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "regression"
+    },
+    {
+      "id": "footnote_opener_fullwidth_caret_control",
+      "input": "See [\uff3eThe handler W1\nmore W2] tail W3",
+      "expected": "See [\uff3eThe handler W1 more W2] tail W3",
+      "rule_ids": [
+        "prose.footnote_opener"
+      ],
+      "kind": "control"
+    },
+    {
+      "id": "reference_issue",
+      "input": "#1 owner/repo#1 project#1 \\#1 &amp;#64;x #01 #1x ##1 #\u0661 `#1 !1 ~bug %v1` x](#1 [a]b](#1) [a](#1 extra) [a](#1",
+      "expected": "\uff031 owner/repo\uff031 project\uff031 \uff031 &amp;\uff0364;x \uff0301 \uff031x #\uff031 #\u0661 `#1 !1 ~bug %v1` x](\uff031 [a]b](\uff031) [a](\uff031 extra) [a](\uff031"
+    },
+    {
+      "id": "reference_merge_request",
+      "input": "!1 probe!1 !1x /!1 \\!1 !\u0661 ![image](url) `!1` and y](!1)",
+      "expected": "\uff011 probe\uff011 \uff011x /\uff011 \uff011 !\u0661 !\uff3bimage](url) `!1` and y](\uff011)"
+    },
+    {
+      "id": "reference_gh",
+      "input": "GH-1 gh-01 gH-2 x/GH-1 (Gh-3) xGH-1 _GH-1 1GH-1 GH-x GH-\u0661 `GH-1` a](GH-1",
+      "expected": "GH\u20111 gh\u201101 gH\u20112 x/GH\u20111 (Gh\u20113) xGH-1 _GH-1 1GH-1 GH-x GH-\u0661 `GH-1` a](GH\u20111"
+    },
+    {
+      "id": "reference_label",
+      "input": "~bug ~\"bug\" ~1 ~_ probe~bug ~~s~~ ~~~old~~~ x~ ~- ~/ ~\u00e9 `~bug` z](~bug",
+      "expected": "\uff5ebug \uff5e\"bug\" \uff5e1 \uff5e_ probe\uff5ebug ~~s~~ ~~~old~~~ x~ ~- ~/ ~\u00e9 `~bug` z](\uff5ebug"
+    },
+    {
+      "id": "reference_milestone",
+      "input": "%v1 %\"v1\" %1 %_ probe%v1 %ab %AB %20 x%ab x%AB x%20 https://x.test/a%20b https://x.test/a%2Fb 50% %! %\u00e9 `%v1`",
+      "expected": "\uff05v1 \uff05\"v1\" \uff051 \uff05_ probe\uff05v1 \uff05ab \uff05AB \uff0520 x\uff05ab x\uff05AB x\uff0520 https://x.test/a%20b https://x.test/a%2Fb 50% %! %\u00e9 `%v1`"
+    },
+    {
+      "id": "reference_url_protection",
+      "input": "https://example.com/readme#1-install https://example.com/~alice/notes https://x.test/a%20b [setup](docs/a%20b.md#1-install) ftp://files.test/~alice/#1!2/GH-3/%v1/&4 www.x.test/p#1 [all](docs/~bug/%v1/!1/GH-2/&3) xhttps://a.b/#1 xftp://a.b/#1 xwww.a.b/#1 /github.com/o/r/commit/1#1 `code`https://a.b/#1 )https://a.b/#1 *https://a.b/#1 _https://a.b/#1 ~https://a.b/#1 (https://a.b/#1) <https://a.b/#1> [title](docs/#1 \"title\") [title](docs/~bug 'title') [a\\]b](docs/#1) \\[a](#1) see [`file.py`](docs/a%20b.md#1-install) [see `x`](docs/~alice/a.md) [https://docs.example.com/guide#1-setup](https://docs.example.com/guide#1-setup) [see `]` now](docs/~alice/a.md) [https://a.b/#1 [a [b] c] [RFC [1] notes](docs/a%20b.md#1-install) [a](#1\\) https://a_b/(#1) [a](#1 \"x\\\") [a](#1 'x\\') https://a_b.example.test:8080/p#1 https://a_b.test/p#1 https://a.b_c/p#1 https://a.b:8080/p#1 www.a_b/p#1 ftp://a_b/p#1 https://host/p#1",
+      "expected": "https://example.com/readme#1-install https://example.com/~alice/notes https://x.test/a%20b [setup](docs/a%20b.md#1-install) ftp://files.test/~alice/#1!2/GH-3/%v1/&4 www.x.test/p#1 [all](docs/~bug/%v1/!1/GH-2/&3) xhttps://a.b/\uff031 xftp://a.b/\uff031 xwww.a.b/\uff031 /github.com/o/r/commit/1\uff031 `code`https://a.b/\uff031 )https://a.b/\uff031 *https://a.b/#1 _https://a.b/#1 ~https://a.b/#1 (https://a.b/#1) &lt;https://a.b/#1> [title](docs/#1 \"title\") [title](docs/~bug 'title') [a\\]b](docs/#1) \\[a](\uff031) see [`file.py`](docs/a%20b.md#1-install) [see `x`](docs/~alice/a.md) [https://docs.example.com/guide#1-setup](https://docs.example.com/guide#1-setup) [see `]` now](docs/~alice/a.md) [https://a.b/\uff031 [a [b] c] [RFC [1] notes](docs/a%20b.md#1-install) [a](\uff031\\) https://a_b/(\uff031) [a](\uff031 \"x\\\") [a](\uff031 'x\\') https://a_b.example.test:8080/p#1 https://a_b.test/p\uff031 https://a.b_c/p\uff031 https://a.b:8080/p#1 www.a_b/p\uff031 ftp://a_b/p\uff031 https://host/p\uff031"
+    },
+    {
+      "id": "reference_urls",
+      "input": "https://github.com/o/r/issues/1 github.com/o/r/issues/1 http://host/group/proj/-/merge_requests/1 [x](http://host/group/proj/-/issues/1) https://github.com/o/r/pull/1#frag https://github.com/o/r/discussions/1?q https://github.com/o/r/issues/1/ <https://github.com/o/r/issues/1> https://host/g/p/-/work_items/1 https://host/g/p/-/epics/1 https://host/g/p/-/milestones/1 https://host/g/p/-/snippets/1 (https://github.com/o/r/issues/1). https://github.com/o/r/issues/1(a) https://github.com/o/r/issues/1.,:;!?'\"*_~ https://github.com/o/r/issues/1/a`b``c [ticks](https://github.com/o/r/issues/1/a`b) https://github.com/o/r/issues/1/@who/![[x www.github.com/o/r/issues/1 http://github.com/o/r/issues/1 `https://github.com/o/r/issues/1` https://github.com/o/r/commit/123 https://host/other/1#1 https://host/p?next=/issues/1 https://host/p#issues/1 https://host/o/r/issues/x https://host/o/r/issues/\u0661 host:8080/g/p/-/issues/1 xgithub.com/o/r/issues/1 a.github.com/o/r/issues/1 -github.com/o/r/issues/1 [relative](docs/issues/1#anchor) [the Sentry event](https://sentry.io/organizations/acme/issues/123/) https://sentry.io/organizations/acme/issues/123/#1 [issue](<http://host/g/p/-/issues/1>) https://host/issues/1#1 https://host/a/b/c/issues/1#1 https://#1 ]( #1 https://enterprise.test/o/r/issues/1 https://host/a/b/c/-/issues/1 [https://github.com/o/r/issues/1](https://github.com/o/r/issues/1) [github.com/o/r/issues/1](github.com/o/r/issues/1) [see https://github.com/o/r/issues/7](https://github.com/o/r/issues/7) \\https://github.com/o/r/issues/1 \\\\https://github.com/o/r/issues/1 see [`owner/repo#12`](https://github.com/owner/repo/issues/12) now [RFC [1] notes](https://github.com/o/r/issues/1) [a [b](c) d](x/#1) [https://github.com/o/r/issues/1 x xhttps://github.com/o/r/issues/1 `code`https://github.com/o/r/issues/1 x](https://github.com/o/r/issues/1)",
+      "expected": "`https://github.com/o/r/issues/1` `github.com/o/r/issues/1` `http://host/group/proj/-/merge_requests/1` [x]\uff08`http://host/group/proj/-/issues/1`) `https://github.com/o/r/pull/1#frag` `https://github.com/o/r/discussions/1?q` `https://github.com/o/r/issues/1/` &lt;`https://github.com/o/r/issues/1`> `https://host/g/p/-/work_items/1` `https://host/g/p/-/epics/1` `https://host/g/p/-/milestones/1` `https://host/g/p/-/snippets/1` (`https://github.com/o/r/issues/1`). `https://github.com/o/r/issues/1(a)` `https://github.com/o/r/issues/1`.,:;!?'\"*_~ ```https://github.com/o/r/issues/1/a`b``c``` [ticks]\uff08``https://github.com/o/r/issues/1/a`b``) `https://github.com/o/r/issues/1/\uff20who/!\uff3b\uff3bx` `www.github.com/o/r/issues/1` `http://github.com/o/r/issues/1` `https://github.com/o/r/issues/1` https://github.com/o/r/commit/123 https://host/other/1\uff031 https://host/p?next=/issues/1 https://host/p#issues/1 https://host/o/r/issues/x https://host/o/r/issues/\u0661 host:8080/g/p/-/issues/1 xgithub.com/o/r/issues/1 a.github.com/o/r/issues/1 -github.com/o/r/issues/1 [relative](docs/issues/1#anchor) [the Sentry event](https://sentry.io/organizations/acme/issues/123/) https://sentry.io/organizations/acme/issues/123/#1 [issue](&lt;http://host/g/p/-/issues/1>) https://host/issues/1\uff031 https://host/a/b/c/issues/1\uff031 https://\uff031 ]( \uff031 https://enterprise.test/o/r/issues/1 `https://host/a/b/c/-/issues/1` [`https://github.com/o/r/issues/1`]\uff08`https://github.com/o/r/issues/1`) [`github.com/o/r/issues/1`]\uff08`github.com/o/r/issues/1`) [see `https://github.com/o/r/issues/7`]\uff08`https://github.com/o/r/issues/7`) `https://github.com/o/r/issues/1` \\\\`https://github.com/o/r/issues/1` see [`owner/repo#12`]\uff08`https://github.com/owner/repo/issues/12`) now [RFC [1] notes]\uff08`https://github.com/o/r/issues/1`) [a [b](c) d](x/\uff031) [`https://github.com/o/r/issues/1` x x`https://github.com/o/r/issues/1` `code` `https://github.com/o/r/issues/1` x]\uff08`https://github.com/o/r/issues/1`)"
+    },
+    {
+      "id": "reference_named_entities",
+      "input": "&num;1 &percnt;v1 &percnt;20 &Num;1 &percent;v1 `&num;1 &percnt;v1`",
+      "expected": "\uff031 \uff05v1 \uff0520 &Num;1 &percent;v1 `#1 %v1`"
+    },
+    {
+      "id": "reference_epic",
+      "input": "&1 project&01 &1x &\u0661 &x `&1` https://x.test/p?x=&1 [x](docs/&1)",
+      "expected": "\uff061 project\uff0601 \uff061x &\u0661 &x `&1` https://x.test/p?x=&1 [x](docs/&1)"
+    },
+    {
+      "id": "reference_percent_parenthesized",
+      "input": "(%1) x%ab x%AB x%20 %a1 %\u0661 %\u00e9 %! `(%1)`",
+      "expected": "(\uff051) x\uff05ab x\uff05AB x\uff0520 \uff05a1 %\u0661 %\u00e9 %! `(%1)`"
+    },
+    {
+      "id": "reference_backslash",
+      "input": "\\#1 \\\\#1 \\\\\\#1 \\\\\\\\#1 \\~bug \\\\~bug \\GH-1 \\\\GH-1 \\#x",
+      "expected": "\uff031 \\\\\uff031 \\\\\uff031 \\\\\\\\\uff031 \uff5ebug \\\\\uff5ebug GH\u20111 \\\\GH\u20111 \\#x"
+    }
+  ],
+  "summary_cases": [
+    {
+      "id": "A-mid-src_a_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "before x [a]: //example.test/SENT](a b) after",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): before x [a]\uff1a //example.test/SENT](a b) after",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): before x [a]\uff1a //example.test/SENT](a b) after"
+    },
+    {
+      "id": "A-mid-src_a_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "before x [a]: //example.test/SENT](a b) after",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: before x [a]\uff1a //example.test/SENT](a b) after",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: before x [a]\uff1a //example.test/SENT](a b) after"
+    },
+    {
+      "id": "A-mid-src_bxbc_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "before x [a]: //example.test/SENT](a b) after",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): before x [a]\uff1a //example.test/SENT](a b) after",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): before x [a]\uff1a //example.test/SENT](a b) after"
+    },
+    {
+      "id": "A-mid-src_bxbc_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "before x [a]: //example.test/SENT](a b) after",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: before x [a]\uff1a //example.test/SENT](a b) after",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: before x [a]\uff1a //example.test/SENT](a b) after"
+    },
+    {
+      "id": "A-title-summary-src_a_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "[x]: u",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): [x]\uff1a u",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): [x]\uff1a u"
+    },
+    {
+      "id": "A-title-summary-src_a_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "[x]: u",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: [x]\uff1a u",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: [x]\uff1a u"
+    },
+    {
+      "id": "A-title-summary-src_bxbc_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "[x]: u",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): [x]\uff1a u",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): [x]\uff1a u"
+    },
+    {
+      "id": "A-title-summary-src_bxbc_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "[x]: u",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: [x]\uff1a u",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: [x]\uff1a u"
+    },
+    {
+      "id": "A-code-control-src_a_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "`x [a]: SENT](a b)`",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): `x [a]\uff1a SENT](a b)`",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/a.py#L3): `x [a]\uff1a SENT](a b)`"
+    },
+    {
+      "id": "A-code-control-src_a_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "`x [a]: SENT](a b)`",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: `x [a]\uff1a SENT](a b)`",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: `x [a]\uff1a SENT](a b)`"
+    },
+    {
+      "id": "A-code-control-src_bxbc_py-linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "`x [a]: SENT](a b)`",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): `x [a]\uff1a SENT](a b)`",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): `x [a]\uff1a SENT](a b)`"
+    },
+    {
+      "id": "A-code-control-src_bxbc_py-plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "`x [a]: SENT](a b)`",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: `x [a]\uff1a SENT](a b)`",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/[x]\uff1a.py:3`: `x [a]\uff1a SENT](a b)`"
+    },
+    {
+      "id": "tilde_interior_linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "a~~~b",
+            "line_start": 3,
+            "title": "a ~~~ b",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`a~~~b:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a\\~\\~\\~b#L3): a \\~\\~\\~ b",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`a~~~b:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a\\~\\~\\~b#L3): a \\~\\~\\~ b"
+    },
+    {
+      "id": "tilde_interior_plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "a~~~b",
+            "line_start": 3,
+            "title": "a ~~~ b",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `a~~~b:3`: a \\~\\~\\~ b",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `a~~~b:3`: a \\~\\~\\~ b"
+    },
+    {
+      "id": "tilde_segment_linked",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "~~~/x.py",
+            "line_start": 3,
+            "title": "a ~~~ b",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`~~~/x.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/\\~\\~\\~/x.py#L3): a \\~\\~\\~ b",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`~~~/x.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/\\~\\~\\~/x.py#L3): a \\~\\~\\~ b"
+    },
+    {
+      "id": "tilde_segment_plain",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "~~~/x.py",
+            "line_start": 3,
+            "title": "a ~~~ b",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `~~~/x.py:3`: a \\~\\~\\~ b",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `~~~/x.py:3`: a \\~\\~\\~ b"
+    },
+    {
+      "id": "colon_tick_footnote_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "[^`]: The handler trusts `X-User` ...; see [docs](https://e.test/auth).",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): \uff3b^`]\uff1a The handler trusts `X-User\\` ...; see [docs](https://e.test/auth).",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): \uff3b^`]\uff1a The handler trusts `X-User\\` ...; see [docs](https://e.test/auth)."
+    },
+    {
+      "id": "colon_tick_definition_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "[`]: /u 'text ` ](x'",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): [`]\uff1a /u 'text ` ](x'",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): [`]\uff1a /u 'text ` ](x'"
+    },
+    {
+      "id": "colon_tick_destination_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/[x]:.py",
+            "line_start": 3,
+            "title": "See [x](`) [label W5]: //e/dest](a b) ` W6",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): See [x](`) [label W5]\uff1a //e/dest](a b) ` W6",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/[x]\uff1a.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5Bx%5D%3A.py#L3): See [x](`) [label W5]\uff1a //e/dest](a b) ` W6"
+    },
+    {
+      "id": "colon_forced_code_title_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "S",
+            "severity": "high",
+            "file": "src/a.py",
+            "line_start": 3,
+            "title": "`[a]: x`",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: `[a]\uff1a x`",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/a.py:3`: `[a]\uff1a x`"
+    },
+    {
+      "id": "footnote_opener_title_and_path_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "footnote-opener",
+            "severity": "high",
+            "file": "src/[^handler.py",
+            "line_start": 3,
+            "title": "See [^The handler trusts X-User W1",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ]
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/\uff3b^handler.py:3`: See \uff3b^The handler trusts X-User W1",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] `src/\uff3b^handler.py:3`: See \uff3b^The handler trusts X-User W1"
+    },
+    {
+      "id": "footnote_opener_title_and_path_linked_summary",
+      "input": {
+        "findings": [
+          {
+            "id": "footnote-opener",
+            "severity": "high",
+            "file": "src/[^handler.py",
+            "line_start": 3,
+            "title": "See [^The handler trusts X-User W1",
+            "location_status": "confirmed",
+            "line_end": 3
+          }
+        ],
+        "prIdentity": {
+          "platform": "gitlab",
+          "web_origin": "http://localhost:8929",
+          "owner": "cdr-group",
+          "repo": "probe",
+          "sha_full": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected_py": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/\uff3b^handler.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5B%5Ehandler.py#L3): See \uff3b^The handler trusts X-User W1",
+      "expected_js": "1 finding after the gauntlet \u2014 1 high.\n\n- \ud83d\udfe0 [HIGH] [`src/\uff3b^handler.py:3`](http://localhost:8929/cdr-group/probe/-/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/%5B%5Ehandler.py#L3): See \uff3b^The handler trusts X-User W1"
+    }
+  ]
+}

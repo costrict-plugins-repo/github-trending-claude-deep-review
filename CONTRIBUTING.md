@@ -1,0 +1,504 @@
+# Contributing to claude-code-gauntlet
+
+Thanks for your interest in contributing! This guide explains how to set up your environment, follow our style and commit conventions, run tests and linters, and submit pull requests.
+
+## Overview
+
+This repository provides a Claude Code plugin that orchestrates multi-agent code review through a deterministic
+pipeline: a generated JavaScript workflow bundle (`workflows/pipeline.js`) plus retained standard-library Python
+scripts (`scripts/`) for verification, posting, and parity. Contributions generally fall into one of these areas:
+
+- Review pipeline stages in the workflow bundle source (`workflows/src/`) — see
+  [The v3 workflow pipeline](#the-v3-workflow-pipeline-js)
+- Bug fixes in the retained Python scripts (`scripts/`)
+- New or improved review agents (`agents/`)
+- Skill orchestration improvements (`skills/`)
+- Benchmark harness, golden set, and measurement tooling (`bench/`)
+- Documentation, examples, and research updates
+- New tests or coverage gaps in the test suite (`tests/`, `bench/tests/`, `workflows/test/`)
+
+Please open an issue first for significant changes to discuss the approach.
+
+## Measurement policy (contributors)
+
+External PRs ship behind the **always-on deterministic suites only** — not a
+paired bench measurement. The functional smoke (`bench/run.py --tier smoke` +
+`--check`) is run by the release manager. Paired mini-subset / full-15 / holdout
+runs are owner-triggered and reserved for changes that plausibly move recall or
+noise. See [`bench/MEASUREMENT.md`](bench/MEASUREMENT.md) for the full tier
+ladder, costs, and pre-registered owner options.
+
+## Getting Started
+
+1. Fork and clone the repository.
+2. Install Python 3.10 or newer for the pipeline scripts, test suite, and pre-commit hooks. CI runs the pipeline
+   suite on 3.10, 3.11, and 3.12 on Linux, and on 3.12 and 3.14 on Windows.
+3. Ensure Node `24.18.0` is installed; the `contract-fences-current` pre-commit hook uses it to verify generated fences.
+4. Set up the development environment:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Pipeline scripts use only the Python standard library — no runtime dependencies are required to run the plugin.
+
+## Development Setup
+
+- Install pre-commit hooks once with `pre-commit install`.
+- Keep changes small and focused; prefer incremental PRs.
+- Pipeline scripts must remain stdlib-only (no `pip install` runtime dependencies).
+- Pipeline scripts must remain language-agnostic — they make no assumptions about the language of the codebase being reviewed.
+
+### Recommended: Secret Scanning Pre-commit Hooks
+
+Secret scanning (`gitleaks`) is included in `.pre-commit-config.yaml` and runs on every commit. To prevent accidental commits of API keys or tokens during development, ensure pre-commit is installed locally with `pre-commit install`.
+
+> ⚠️ **Note:** To keep your hooks current with the latest versions, periodically run `pre-commit autoupdate`.
+
+### Common Commands
+
+```bash
+# Pipeline pytest suite (the import-ban test runs Ruff from the dev group)
+pip install --group dev
+python -m pytest tests/ -q
+
+# Bench harness unit tests (stdlib; no API spend)
+python -m pytest bench/tests/ -q
+
+# JS workflow tests (Node 24)
+node --test workflows/test/*.test.js
+
+# Run the Biome JS lint gate locally (downloads the pinned binary once, verifies its checksum)
+python3 workflows/test/tools/biome_check.py
+
+# Rebuild the generated workflow bundle after editing workflows/src/
+node workflows/build.js
+
+# Run full pre-commit checks across the repo
+pre-commit run --all-files
+
+# Run the pinned Python lint, format, and type checks
+pre-commit run ruff-check --all-files
+pre-commit run ruff-format --all-files
+pre-commit run mypy --all-files
+
+# Audit GitHub Actions workflows
+pre-commit run zizmor --all-files
+
+# Optional: ignore mass mechanical reflows in git blame
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Run markdown linting only
+pre-commit run markdownlint-fix --all-files
+
+# Run docs spell checking only
+pre-commit run cspell --all-files
+```
+
+Pass the test glob explicitly: the bare directory form is not a valid `node --test` target on node 24.
+
+## Architecture
+
+Your session prepares the target and delivers the result.
+It invokes one workflow for the review stages.
+Use these phase names when reporting a failure:
+
+1. Pre-flight: the session checks eligibility and resolves configuration.
+2. Target & triage: the session gathers the diff, risk classification, and project rules.
+3. Summarize & discover: agents summarize the changes and propose findings in parallel.
+4. Merge & verify: the pipeline combines candidates and checks source facts and git blame.
+5. Validate: an independent agent tries to disprove each finding.
+6. Filter: the pipeline applies thresholds, rejects injection, and groups related findings.
+7. Blind challenge: a fresh agent checks each claim without the original reasoning or evidence.
+8. Report & deliver: the workflow renders results; the session saves artifacts and handles delivery.
+
+The workflow renders and ranks results but has no filesystem access.
+On the default RETURN path, the session runs `materialize_artifacts.py` to save artifacts under `.code-gauntlet/`.
+Writer fallbacks persist through `artifact-writer`.
+Set `$CODE_GAUNTLET_OUTPUT_DIR` to change the output directory.
+
+Successful runs save full challenge output and phase counts in a slim checkpoint.
+Resuming from it reuses challenge results and reruns earlier stages.
+Failure returns can carry completed phase outputs for a faster resume.
+Merging, filtering, and ranking use pure functions.
+A failed agent records a gap while other agents continue.
+The [research index](docs/research/README.md) explains the design choices.
+
+## Project layout
+
+```text
+claude-code-gauntlet/
+|-- .claude-plugin/           # Plugin and marketplace manifests
+|-- agents/                  # Discovery and support agent contracts
+|-- workflows/               # JS sources, bundler, generated pipeline, Node tests
+|-- scripts/                 # Shipped standard-library Python scripts
+|-- tests/                   # Python tests and cross-runtime fixtures
+|-- bench/                   # Golden PRs, judge, anchors, ledger, reports
+|-- skills/
+|   `-- code-gauntlet/        # Review orchestration and phase references
+`-- docs/research/           # Design evidence
+```
+
+## The v3 workflow pipeline (JS)
+
+The review pipeline runs inside Claude Code's workflow runtime, so it carries constraints the Python side does not.
+
+- **Source lives in `workflows/src/*.js`.** Those modules use ESM `import`/`export` for test time only; the shipped
+  artifact has no module system at all.
+- **`workflows/pipeline.js` is generated — never hand-edit it.** `node workflows/build.js` strips the
+  import/export lines, drops parser-proven inert full-line comments and blank lines, concatenates
+  `workflows/src/*.js` into that single dependency-free bundle, and fails when it exceeds the
+  `WORKFLOW_SCRIPT_CAP - BUNDLE_HEADROOM` size gate. Rebuild after every source change and commit
+  the result.
+- **Only JSON-safe language globals are guaranteed.** Host globals that `node --test` hands you — `structuredClone`,
+  `setTimeout`/`queueMicrotask`, `process`, and others — are absent from the workflow runtime sandbox, so a
+  reference keeps every local test green and then throws on the first live dispatch. `workflows/biome.json`
+  (`deniedGlobals`) holds the normative list; deep-clone with the bundle's `deepClone` helper, never `structuredClone`.
+- **CI pins Node `24.18.0` exactly.** Coverage floors are sensitive to the V8 build; the patch pin stops an
+  unrelated Node bump from moving percentages. The bare inner-loop command is `node --test workflows/test/*.test.js`;
+  the CI coverage gate (floors + allowlist + presence) is the JS command in the [Coverage gates](#coverage-gates) block
+  and must stay byte-identical to `.github/workflows/ci.yml`. There is no `package.json` and no
+  `node_modules`; use Node built-ins only.
+- **Bundle freshness is enforced.** `tests/test_bundle_fresh.py` and CI both rebuild and compare, so a stale or
+  hand-edited bundle fails the build:
+
+```bash
+node workflows/build.js
+git diff --exit-code workflows/pipeline.js
+```
+
+### JS lint
+
+CI and contributors run the same `python3 workflows/test/tools/biome_check.py`; the operational
+version and per-asset SHA-256 pins live only in `workflows/biome-pin.json`.
+To bump, list the new digests with
+`gh api repos/biomejs/biome/releases/tags/@biomejs/biome@<new> --jq '.assets[] | {name, digest}'`
+and update every entry in `biome-pin.json` together. Never add a package manifest for auto-bumps.
+Formatter is **off**: default `lineWidth: 80` would wrap long `import … from` lines and break
+`build.js`'s single-line import `strip()` regex, failing `tests/test_bundle_fresh.py`.
+`noRestrictedGlobals` applies to `src/` only; `test/**` and `build.js` override it (they
+legitimately use `process` / `console`).
+
+Deferred rules (measured 2026-07-30, HEAD `ebf399d`) — hit counts are why they
+stay off so a later re-evaluation need not re-derive them:
+
+| Rule | Hits | Why deferred |
+| --- | --- | --- |
+| `useOptionalChain` | 51 | Style churn; no reliability delta |
+| `noUnusedFunctionParameters` | 55 | Dominated by positional mock callback params in tests |
+| `noAssignInExpressions` | 7 | Six are intentional `entry.js` pattern |
+| `noControlCharactersInRegex` | 1 | Intentional U+0000/U+001F sanitization in `registry.js` |
+| `organizeImports` | 24 | Assist/format-adjacent; out of scope with formatter off |
+
+### Parity fixtures
+
+The five transform families (`merge_findings`, `finding_dedup`, `filter_findings`,
+`apply_validations`, `apply_challenges`) are JavaScript-owned. Their golden fixtures live at
+`tests/fixtures/parity/<family>/[<group>/]<case>/{input,expected}.json`.
+When intended behavior changes, update the JavaScript transform and regenerate its goldens with
+`UPDATE_GOLDENS=1` in a reviewed diff. Do not hand-edit expected files to make a test pass.
+The three verify-wire families remain Python-recorded.
+
+```bash
+UPDATE_GOLDENS=1 node --test workflows/test/goldens.test.js
+python3 workflows/test/tools/record_parity.py --check
+```
+
+### Outbound render probes
+
+Every row of `tests/fixtures/outbound_comment_cases.json` records how GitHub and GitLab render its
+expected text: `github_probe` from `gh api markdown`, and `gitlab_probe` from a GitLab markdown API
+call with project context. Tests check each probe's input hash against the row's current expected
+text, then apply containment and divergence checks to the stored renders. They ignore renderer
+chrome and added attributes, ASCII whitespace runs, soft line breaks, the project blob prefix,
+and recorded divergences. `record --check` re-renders to catch renderer drift.
+
+GitLab CE 19.4.1 quick-action verdicts are recorded separately from Markdown renders, in
+`tests/fixtures/gitlab_quick_action_verdicts_19_4_1.json`. The recorder runs GitLab's own
+`:quick_action` pipeline and Extractor through `gitlab-rails runner` and creates no note. Each
+verdict lists the extracted commands, and `stored_equals_posted` is false when the Extractor would
+change the posted text. Re-record the verdicts when the supported GitLab version, an outbound
+expected text or a composer's output changes.
+
+When a change alters an expected text, re-record both probes and review the diff. The GitLab
+probe needs the local GitLab instance described below; the seed creates the users and groups
+the fixture mentions, and `record` checks that every seedable handle renders as a link. GitLab
+never links `@all` or one-character names.
+
+```bash
+python3 tests/tools/render_probes.py record --platform github   # needs gh auth; posts nothing
+python3 tests/tools/render_probes.py seed                       # local GitLab, GITLAB_TOKEN set
+python3 tests/tools/render_probes.py record --platform gitlab
+python3 tests/tools/render_probes.py divergence --id ROW --issue NUMBER --note TEXT
+python3 tests/tools/render_probes.py record --platform gitlab --check  # re-render, writes nothing
+python3 tests/tools/render_probes.py quick-actions                     # local GitLab Rails, records verdicts
+python3 tests/tools/render_probes.py quick-actions --check             # compares without writing
+```
+
+Start GitLab with the same external URL the recorded probes use, since rendered links are
+absolute:
+
+```bash
+docker run --detach --name cdr-gitlab --hostname localhost \
+  --publish 8929:8929 --shm-size 256m \
+  --env GITLAB_OMNIBUS_CONFIG="external_url 'http://localhost:8929'" \
+  gitlab/gitlab-ce:19.4.1-ce.0
+```
+
+When `curl -s -o /dev/null -w '%{http_code}' http://localhost:8929/api/v4/version` prints 401,
+export a root API token:
+
+```bash
+export GITLAB_TOKEN=$(docker exec cdr-gitlab gitlab-rails runner \
+  'u=User.find_by_username("root"); puts u.personal_access_tokens.create!(name: "render-probes", scopes: ["api"], expires_at: Date.today + 30).token')
+```
+
+Then run the `seed` and GitLab `record` commands above. GitHub recording needs only an
+authenticated `gh`. Add `--check` to either `record` command to re-render without writing.
+
+### Optional outbound canary
+
+After changing outbound preparation, entity handling, marker neutralization or probe HTML checks,
+run this locally with authenticated `gh` and network access:
+
+```bash
+python3 tests/tools/outbound_canary.py --live --seed 375 --cases 64
+```
+
+It renders generated `prepare_prose` and `prepare_line` outputs with GitHub's Markdown API and
+posts no comments. This optional check never runs in CI or pre-commit; deterministic offline
+suites remain the merge gate. Replay a failure with the printed seed, mention handle and case
+index; both operations always run. Add the printed input as a reviewed regression fixture with an
+independently written safe expected value. A failed renderer or preflight is not a passing
+containment check. Record seed, generator version and results in the PR when you run it. Fixture
+changes follow the separate recorder workflow above.
+
+## Style and Quality
+
+- Markdown is linted using markdownlint (via pre-commit). Keep lines reasonably short and headings well structured.
+- Public-facing docs are spell-checked with cspell. Add broadly reusable project terms to `cspell.config.yaml` and prefer file-specific overrides for one-off names.
+- YAML and TOML files are validated for syntax errors.
+- Commit messages must follow the Conventional Commits specification (enforced via commitlint).
+- Keep documentation consistent with `README.md`.
+
+## Coverage gates
+
+Coverage gates (CI; JS on Node 24.18.0, Python on 3.12). Each command is
+self-contained and byte-identical to the matching `run:` body in
+`.github/workflows/ci.yml`. Locally, coverage data files must stay out of the
+repo tree (an in-tree data file trips the bench plugin-mutation guard):
+
+```bash
+COVERAGE_FILE="$(mktemp -d)/.coverage" python -m pytest tests/ -q \
+  --cov=scripts --cov=.github --cov-fail-under=94.6
+
+COVERAGE_FILE="$(mktemp -d)/.coverage" python -m pytest bench/tests/ -q \
+  --cov=bench --cov-fail-under=88.6
+
+LCOV="$(mktemp -d)/js-coverage.lcov" && node --test --experimental-test-coverage \
+  --test-coverage-include='workflows/src/*.js' \
+  --test-coverage-include='workflows/build.js' \
+  --test-coverage-lines=98.6 \
+  --test-coverage-branches=91.8 \
+  --test-coverage-functions=98.5 \
+  --test-reporter=spec --test-reporter-destination=stdout \
+  --test-reporter=lcov --test-reporter-destination="$LCOV" \
+  workflows/test/*.test.js \
+  && node workflows/test/tools/check_coverage_presence.mjs "$LCOV"
+```
+
+Floors: Python 94.6 / 88.6, JS 98.6 / 91.8 / 98.5, each pinned from a PR's CI measurement;
+the ratchet history is in git. Policy: a floor sits no more than 1.0 pp below the CI
+measurement for that gate; lower a floor only in the PR that causes the drop, with
+the reason in the body; raise when measured headroom exceeds 1.0 pp. A sudden
+multi-point JS drop usually means a deleted fixture group or an unloaded
+module (presence check); a sudden multi-point Python drop means broken
+subprocess capture — fix capture, do not lower.
+`workflows/test/tools/record_parity.py` is test infrastructure, outside Python
+scopes. JS measures `workflows/build.js` + loaded `workflows/src/*.js` via the
+include allowlist; `pipeline_entry.js` is exempt from presence only.
+
+## Testing
+
+Before submitting a PR, run:
+
+```bash
+python -m pytest tests/ -q
+python -m pytest bench/tests/ -q
+node --test workflows/test/*.test.js
+python3 workflows/test/tools/biome_check.py
+node workflows/build.js && git diff --exit-code workflows/pipeline.js
+claude plugin validate .
+pre-commit run --all-files
+```
+
+`python -m pytest tests/ -q` runs on Linux, macOS and Windows. Windows requires
+Git for Windows and Python 3.10+ reachable as `python3`, `python`, or `py -3`.
+The manual `windows_live: true` input on CI runs a live headless local-changes
+review on windows-latest, using the `windows-live` environment and subscription
+token behind a required reviewer. Windows CI covers command execution and PR
+checkout and posting where tests do not rely on shebang fake CLIs; no live forge
+review runs on Windows.
+The job pins its Claude Code version, so rerun it only for changes to path
+handling, interpreter selection, shell commands, the job itself, or that pin.
+The Node suite (`workflows/test`) and `bench/tests` run in CI on Linux.
+Scripts write UTF-8 with LF on every OS;
+`tests/test_text_io_guard.py` checks known standard-library file, path,
+compression, temporary-file, logging, and subprocess calls; it requires a
+literal encoding for supported text-mode calls and rejects APIs that cannot
+configure text encoding.
+
+This will:
+
+- Execute the pytest suite for pipeline scripts and the bench harness
+- Execute the Node workflow test suite (stage contracts, parity replay, and the bundler's collision guard)
+- Execute the shared Biome JS lint gate with its pinned binary
+- Confirm the committed bundle is byte-identical to a fresh build
+- Validate the plugin and marketplace manifests
+- Check YAML and TOML syntax
+- Fix Markdown formatting issues
+- Spell-check public-facing documentation
+- Scan for committed secrets
+- Audit GitHub Actions workflows for unsafe configuration, including non-hash-pinned actions
+- Validate the commit message format (on commit)
+
+`claude plugin validate .` needs the Claude Code CLI on your `PATH` — the same CLI this plugin installs into, so
+no extra dependency. CI installs a pinned version (`.github/workflows/validate.yml`) and runs it on every pull
+request, so a local run is a fast pre-check, not the enforcement. Skip it only if you do not have the CLI.
+
+One required check has no local command and is **CI-only**: `lint-pr-title` (needs the PR title). Everything else in the
+merge gate is reproducible from the block above.
+
+The `Marketplace Plugin Scanner` job runs the plugin catalog's own scanner and fails under a score of 80 or on a
+high-severity finding. It is advisory, not a required check. A hardcoded-secret or dynamic-execution hit means:
+reshape the literal and keep its runtime value; `tests/test_scanner_literals.py` reports the file and line locally.
+For any other finding, read the job summary.
+
+Live bench smoke and paired measurements are **not** contributor gates — see
+[`bench/MEASUREMENT.md`](bench/MEASUREMENT.md).
+
+## Branching and Commit Conventions
+
+### Branch Naming
+
+Use short, descriptive branch names with a category prefix:
+
+- `feat/<short-topic>`
+- `fix/<short-topic>`
+- `docs/<short-topic>`
+- `chore/<short-topic>`
+- `refactor/<short-topic>`
+
+Examples:
+
+- `feat/new-agent`
+- `docs/usage-examples`
+- `fix/verify-findings-blame`
+
+### Conventional Commits
+
+We follow the Conventional Commits specification. Examples:
+
+- `feat: add new severity dimension to bug-detector`
+- `fix: correct blame classification for renamed files`
+- `docs: add usage examples`
+- `chore: update markdownlint config`
+
+If a change is breaking, include `!` (e.g., `feat!: change findings JSON schema`).
+
+## Pull Requests
+
+- Keep PRs focused and well scoped.
+- **PR titles must follow Conventional Commits format** (e.g., `feat: add new feature`). This is enforced by an automated check.
+- PR description template:
+
+```markdown
+## Why?
+
+## What Changed?
+
+## Additional Notes
+```
+
+- Ensure all checks pass (pre-commit and the test suite) before requesting review. The checklist in
+  `.github/pull_request_template.md` enumerates every CI-enforced gate a contributor can run locally; tick the
+  ones that apply and say why for any you skipped. The CI-only check named under
+  [Testing](#testing) has no local command and is not on the checklist.
+- **Merges to `main` require the always-on CI check-runs to be green** (lint, pytest
+  matrix, workflow JS tests, bench self-tests, plugin validate, PR title lint). Those
+  contexts are frozen in `REQUIRED_PR_CHECK_CONTEXTS` in
+  `tests/test_contribution_surface.py`, and CI enforces that tuple against the workflow
+  job names. Updating the live `protect-default-branch` ruleset is a same-change
+  maintainer step that CI cannot perform or verify. If a job is renamed without updating
+  the ruleset, merges can remain blocked waiting for the old context, which will never
+  report. Approving reviews stay at zero by design (solo maintainer). The only ruleset
+  bypass is the Octo STS app used by `release.yml` — not a routine admin merge path.
+- Reference related issues where applicable. For work-queue issues, keep the PR aligned with the issue's stated
+  requirements and verification steps ([`docs/maintainer-issues.md`](docs/maintainer-issues.md)).
+
+### PR Title Format
+
+PR titles are validated automatically and must follow this format:
+
+```text
+<type>(<optional scope>): <description>
+```
+
+**Valid types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
+
+**Examples:**
+
+- `feat(security): add SSRF detection patterns`
+- `fix: resolve race condition in agent dispatch`
+- `docs: update installation instructions`
+- `chore: bump pre-commit hook versions`
+
+The description should:
+
+- Start with a lowercase letter
+- Be concise and descriptive
+- Use imperative mood (e.g., "add" not "added" or "adds")
+
+**Breaking changes:** Add `!` after the type (e.g., `feat!: change findings JSON schema`)
+
+If the automated check fails, update your PR title and it will re-run automatically.
+
+## Issue Templates
+
+Use the GitHub issue templates under `.github/ISSUE_TEMPLATE/` for bug reports, feature requests, and questions. These templates prompt for summary, context, reproduction steps, and the relevant phase, agent, or pipeline script.
+
+The label taxonomy those forms draw from is checked in at `.github/labels.json`. GitHub applies an issue-form label
+only when the label already exists in the repository, and silently drops it otherwise — so a new form label has to
+land in `labels.json` and in the repository before the form can apply it. GitHub serves issue forms from the
+default branch only and refuses to render an invalid form without erroring, so a form can be exercised only
+after its change merges.
+
+Maintainer-authored work-queue issues follow a stricter standard than the public forms:
+[`docs/maintainer-issues.md`](docs/maintainer-issues.md) defines the required sections and the evidence an issue
+needs before it is queued. Read it before filing or picking up work-queue issues.
+
+Suspected vulnerabilities do not belong in any issue form — follow [`SECURITY.md`](SECURITY.md) and use the private
+advisory form instead.
+
+## Code of Conduct
+
+We strive to maintain a welcoming and respectful community. Please review our [Code of Conduct](CODE_OF_CONDUCT.md) to understand our community standards and expectations.
+
+Report conduct concerns to the Liatrio Maintainers team (`@liatrio-labs/liatrio-labs-maintainers`), the only
+enforcement contact the Code of Conduct names. Suspected vulnerabilities are a different channel — follow
+[`SECURITY.md`](SECURITY.md) and use the private advisory form, which is for vulnerabilities only.
+
+## References
+
+- `README.md` — overview and quick start
+- `AGENTS.md` — the instructions coding agents load, with a short one in `workflows/` and `agents/`.
+  There is deliberately no `CLAUDE.md`: Claude Code reads `AGENTS.md` only where no `CLAUDE.md` or
+  `CLAUDE.local.md` sits at or above the working directory, so adding either one hides these files from it
+- `SECURITY.md` — supported versions, private reporting channel, and scope
+- `bench/MEASUREMENT.md` — ratcheted measurement policy (canonical)
+- `docs/maintainer-issues.md` — maintainer work-queue issue standard
+- `.pre-commit-config.yaml` — linting and formatting hooks
+- `.github/ISSUE_TEMPLATE/` — issue forms
+- `.github/labels.json` — checked-in label taxonomy the forms resolve against
+- `docs/research/` — research artifacts informing the design
