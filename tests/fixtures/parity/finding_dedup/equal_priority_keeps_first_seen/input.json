@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "id": "F1",
+      "title": "first-seen-agent-a"
+    },
+    {
+      "id": "F1",
+      "title": "second-agent-b"
+    }
+  ]
+}

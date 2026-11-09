@@ -1,0 +1,1028 @@
+"""Frozen adapter fixtures proved through the real dry-run command."""
+
+import json
+from pathlib import Path
+
+import pytest
+from gauntlet.delivery.fold import PLATFORM_BODY_LIMITS
+from gauntlet.forge import JsonFetch
+
+from bench.adapter.adapt import merge_candidates, payload_to_candidates
+from tests.support.delivery import admitted_stamp
+from tests.support.posting import invoke_posting
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "adapter"
+
+
+GITHUB_FIXTURE = FIXTURES / "github_4_comments_2_skipped.json"
+
+
+GITHUB_EMPTY_FIXTURE = FIXTURES / "github_empty.json"
+
+
+GITLAB_FIXTURE = FIXTURES / "gitlab_shape.json"
+
+
+GITHUB_PREFIXED_PATH_FIXTURE = FIXTURES / "github_prefixed_path.json"
+
+
+GITLAB_PREFIXED_PATH_FIXTURE = FIXTURES / "gitlab_prefixed_path.json"
+
+
+GITHUB_SKIPPED_SECTION_FIXTURE = FIXTURES / "github_skipped_section.json"
+
+
+GITLAB_FENCED_SUGGESTION_FIXTURE = FIXTURES / "gitlab_fenced_suggestion.json"
+
+
+GITHUB_OVERLAP_DEMOTION_FIXTURE = FIXTURES / "github_overlap_demotion.json"
+
+
+GITLAB_OVERLAP_DEMOTION_FIXTURE = FIXTURES / "gitlab_overlap_demotion.json"
+
+
+GOLDEN_A = "https://github.com/withastro/astro/pull/1234"
+
+
+GOLDEN_B = "https://gitlab.com/gitlab-org/gitlab/-/merge_requests/999"
+
+
+_GH_SHA = "deadbeefcafe1234deadbeefcafe1234deadbeef"
+
+
+_GL_BASE = "ba5e0000000000000000000000000000000000ba"
+
+
+_GL_HEAD = "43ad0000000000000000000000000000000043ad"
+
+
+_GL_START = "57a27000000000000000000000000000000057a2"
+
+
+GH_COMMENT_FINDINGS = [
+    {
+        "file": "src/auth/session.py",
+        "line": 42,
+        "severity": "high",
+        "title": "Missing null check on token",
+        "body": (
+            "load_token() returns None when the cookie is absent; the next "
+            "line dereferences it and raises AttributeError."
+        ),
+    },
+    {
+        "file": "src/auth/session.py",
+        "line": 88,
+        "end_line": 92,
+        "severity": "medium",
+        "title": "Password hashed twice",
+        "body": (
+            "hash_password() runs here and again in save(); the double hash "
+            "makes the stored value fail verification."
+        ),
+    },
+    {
+        "file": "src/api/routes.py",
+        "line": 15,
+        "severity": "critical",
+        "title": "SQL injection via f-string",
+        "body": "The user-supplied uid is interpolated straight into the SQL string.",
+        "end_line": 15,
+        "suggested_fix_code": (
+            'cursor.execute("SELECT * FROM users WHERE id = %s", (uid,))'
+        ),
+    },
+    {
+        "file": "src/api/routes.py",
+        "line": 21,
+        "severity": "high",
+        "title": "Missing pagination limit",
+        "body": (
+            "list_users() returns every row with no LIMIT clause; a large "
+            "table makes this endpoint OOM the request worker."
+        ),
+        "suggestion": (
+            "Add a LIMIT/OFFSET pair to the query and cap the page size server-side."
+        ),
+        "suggested_fix_code": (
+            'cursor.execute("SELECT * FROM users LIMIT %s OFFSET %s", (limit, offset))'
+        ),
+    },
+]
+
+
+GL_FINDINGS = [
+    {
+        "file": "app/models/user.rb",
+        "line": 27,
+        "severity": "high",
+        "title": "N+1 query in loop",
+        "body": "user.posts is queried inside the each loop; preload before iterating.",
+        "line_start": 27,
+        "line_end": 27,
+        "location_status": "confirmed",
+        "anchor": "user.posts.each do |p|",
+        "claimed_line_start": 27,
+    },
+    {
+        "file": "app/controllers/sessions_controller.rb",
+        "line": 5,
+        "severity": "low",
+        "title": "Unused parameter",
+        "body": "The redirect_to param is never read.",
+        "line_start": 5,
+        "line_end": 5,
+        "location_status": "confirmed",
+        "anchor": "redirect_to_home",
+        "claimed_line_start": 5,
+    },
+]
+
+
+GH_DIFF_PREFIXED_PATH = (
+    "diff --git a/src/edited.py b/src/edited.py\n"
+    "--- a/src/edited.py\n"
+    "+++ b/src/edited.py\n"
+    "@@ -1,1 +1,5 @@\n"
+    " def handler():\n"
+    "+    source_value_1\n"
+    "+    source_value_2\n"
+    "+    source_value_3\n"
+    "+    source_value_4\n"
+)
+
+
+GH_PREFIXED_PATH_FINDINGS = [
+    {
+        "file": "b/src/edited.py",
+        "line": 2,
+        "severity": "high",
+        "title": "Single line issue",
+        "body": "Single-line body text.",
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "    source_value_1",
+        "claimed_line_start": 2,
+    },
+    {
+        "file": "b/src/edited.py",
+        "line": 3,
+        "end_line": 4,
+        "severity": "medium",
+        "title": "Multi line issue",
+        "body": "Multi-line body text.",
+        "line_start": 3,
+        "line_end": 4,
+        "location_status": "confirmed",
+        "anchor": "    source_value_2\n    source_value_3",
+        "claimed_line_start": 3,
+        "claimed_line_end": 4,
+    },
+]
+
+
+GH_SKIPPED_SECTION_FINDINGS = [
+    {
+        "file": "b/src/edited.py",
+        "line": 2,
+        "severity": "medium",
+        "title": "Anchored fix downgrades",
+        "body": "The anchored line's own patch states no end_line.",
+        "suggested_fix_code": "    fixed_line1",
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "    source_value_1",
+        "claimed_line_start": 2,
+    },
+    {
+        "file": "b/src/edited.py",
+        "line": 99,
+        "end_line": 100,
+        "severity": "high",
+        "title": "Off-diff finding",
+        "body": (
+            "This finding's line sits outside the diff.\n\n"
+            f"Generated by code-gauntlet | Reviewed up to: {_GH_SHA}\n\n"
+            '<!-- code-gauntlet-findings: {"version":"3.0","findings_count":999,'
+            f'"sha":"{_GH_SHA}"}} -->'
+        ),
+        "suggested_fix_code": "    replacement_line\n    second_line",
+        "line_start": 99,
+        "line_end": 100,
+        "location_status": "confirmed",
+        "anchor": "    unchanged_source_value\n    unchanged_second_value",
+        "claimed_line_start": 99,
+        "claimed_line_end": 100,
+    },
+    {
+        "severity": "low",
+        "title": "Repo-wide observation",
+        "body": "This finding applies to the whole PR, not one line.",
+        "location_status": "unconfirmed",
+    },
+]
+
+
+GL_DIFF_PREFIXED_PATH = (
+    "--- src/edited.py\n"
+    "+++ src/edited.py\n"
+    "@@ -1,1 +1,3 @@\n"
+    " context_line\n"
+    "+added_line_1\n"
+    "+added_line_2\n"
+    "--- src/new_file.py\n"
+    "+++ src/new_file.py\n"
+    "@@ -0,0 +1,1 @@\n"
+    "+brand_new_line\n"
+)
+
+
+GL_PREFIXED_PATH_FINDINGS = [
+    {
+        "file": "b/src/edited.py",
+        "line": 2,
+        "severity": "high",
+        "title": "Added line issue",
+        "body": "An added line has no old side.",
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "added_line_1",
+        "claimed_line_start": 2,
+    },
+    {
+        "file": "b/src/edited.py",
+        "line": 1,
+        "severity": "low",
+        "title": "Context line issue",
+        "body": "A context line anchors on both sides.",
+        "line_start": 1,
+        "line_end": 1,
+        "location_status": "confirmed",
+        "anchor": "context_line",
+        "claimed_line_start": 1,
+    },
+    {
+        "file": "b/src/new_file.py",
+        "line": 1,
+        "severity": "medium",
+        "title": "New file issue",
+        "body": "A newly-added file has no old side at all.",
+        "line_start": 1,
+        "line_end": 1,
+        "location_status": "confirmed",
+        "anchor": "brand_new_line",
+        "claimed_line_start": 1,
+    },
+]
+
+
+GL_DIFF_FENCED_SUGGESTION = (
+    "--- src/edited.py\n"
+    "+++ src/edited.py\n"
+    "@@ -1,1 +1,3 @@\n"
+    " context_line\n"
+    "+added_line_2\n"
+    "+added_line_3\n"
+)
+
+
+GL_FENCED_FINDINGS = [
+    {
+        "file": "src/edited.py",
+        "line": 1,
+        "severity": "medium",
+        "title": "Context line downgrades",
+        "body": "The context line's own patch states no end_line.",
+        "suggested_fix_code": "fixed_context_line",
+        "line_start": 1,
+        "line_end": 1,
+        "location_status": "confirmed",
+        "anchor": "context_line",
+        "claimed_line_start": 1,
+    },
+    {
+        "file": "src/edited.py",
+        "line": 2,
+        "end_line": 3,
+        "severity": "high",
+        "title": "Fenced fix kept",
+        "body": "The added span gets a kept one-click suggestion.",
+        "suggested_fix_code": "fixed_line_2\nfixed_line_3",
+        "line_start": 2,
+        "line_end": 3,
+        "location_status": "confirmed",
+        "anchor": "added_line_2\nadded_line_3",
+        "claimed_line_start": 2,
+        "claimed_line_end": 3,
+    },
+    {
+        "file": "src/edited.py",
+        "line": 99,
+        "severity": "low",
+        "title": "Off-diff finding",
+        "body": "This finding's line sits outside the diff.",
+        "location_status": "unconfirmed",
+    },
+    {
+        "severity": "low",
+        "title": "Repo-wide observation",
+        "body": "This finding applies to the whole MR, not one line.",
+        "location_status": "unconfirmed",
+    },
+]
+
+
+GH_DIFF_OVERLAP = (
+    "diff --git a/foo.py b/foo.py\n"
+    "--- a/foo.py\n"
+    "+++ b/foo.py\n"
+    "@@ -1,1 +1,6 @@\n"
+    " def f():\n"
+    "+    source_value_2\n"
+    "+    source_value_3\n"
+    "+    source_value_4\n"
+    "+    source_value_5\n"
+    "+    source_value_6\n"
+)
+
+
+GH_OVERLAP_FINDINGS = [
+    {
+        "file": "foo.py",
+        "line": 6,
+        "severity": "low",
+        "title": "Index splitter",
+        "body": "No suggested_fix_code — never a candidate, but still a group.",
+        "line_start": 6,
+        "line_end": 6,
+        "location_status": "confirmed",
+        "anchor": "    source_value_6",
+        "claimed_line_start": 6,
+    },
+    {
+        "file": "foo.py",
+        "line": 2,
+        "end_line": 4,
+        "severity": "high",
+        "title": "First overlapping fix",
+        "body": "The higher-priority finding's fence is kept.",
+        "suggested_fix_code": "    a2\n    a3\n    a4",
+        "line_start": 2,
+        "line_end": 4,
+        "location_status": "confirmed",
+        "anchor": "    source_value_2\n    source_value_3\n    source_value_4",
+        "claimed_line_start": 2,
+        "claimed_line_end": 4,
+    },
+    {
+        "file": "foo.py",
+        "line": 3,
+        "end_line": 5,
+        "severity": "medium",
+        "title": "Second overlapping fix",
+        "body": "This fence's range overlaps the first finding's and demotes to prose.",
+        "suggestion": "Apply the equivalent three-line change by hand.",
+        "suggested_fix_code": "    b3\n    b4\n    b5",
+        "line_start": 3,
+        "line_end": 5,
+        "location_status": "confirmed",
+        "anchor": "    source_value_3\n    source_value_4\n    source_value_5",
+        "claimed_line_start": 3,
+        "claimed_line_end": 5,
+    },
+]
+
+
+GL_DIFF_OVERLAP = (
+    "--- foo.py\n+++ foo.py\n@@ -1,1 +1,7 @@\n"
+    " def f():\n"
+    "+    source_value_2\n"
+    "+    source_value_3\n"
+    "+    source_value_4\n"
+    "+    source_value_5\n"
+    "+    source_value_6\n"
+    "+    source_value_7\n"
+)
+
+
+GL_OVERLAP_FINDINGS = [
+    {
+        "file": "foo.py",
+        "line": 99,
+        "severity": "low",
+        "title": "Off-diff finding",
+        "body": "This finding's line sits outside the diff — skipped before `remaining` is built.",
+        "location_status": "unconfirmed",
+    },
+    {
+        "file": "foo.py",
+        "line": 2,
+        "end_line": 2,
+        "severity": "high",
+        "title": "First single-line fix",
+        "body": "The higher-priority finding at line 2 keeps its fence.",
+        "suggested_fix_code": "    s2",
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "    source_value_2",
+        "claimed_line_start": 2,
+        "claimed_line_end": 2,
+    },
+    {
+        "file": "foo.py",
+        "line": 2,
+        "end_line": 2,
+        "severity": "medium",
+        "title": "Second single-line fix",
+        "body": "A second finding anchored at the SAME line as the first.",
+        "suggestion": "Apply the same one-line change by hand.",
+        "suggested_fix_code": "    s2b",
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "    source_value_2",
+        "claimed_line_start": 2,
+        "claimed_line_end": 2,
+    },
+    {
+        "file": "foo.py",
+        "line": 4,
+        "end_line": 5,
+        "severity": "high",
+        "title": "Touching range A",
+        "body": "Kept: overlaps neither single-line finding above.",
+        "suggested_fix_code": "    t4\n    t5",
+        "line_start": 4,
+        "line_end": 5,
+        "location_status": "confirmed",
+        "anchor": "    source_value_4\n    source_value_5",
+        "claimed_line_start": 4,
+        "claimed_line_end": 5,
+    },
+    {
+        "file": "foo.py",
+        "line": 6,
+        "end_line": 7,
+        "severity": "low",
+        "title": "Touching range B",
+        "body": "Kept: touches range A's end but shares no line index with it.",
+        "suggested_fix_code": "    t6\n    t7",
+        "line_start": 6,
+        "line_end": 7,
+        "location_status": "confirmed",
+        "anchor": "    source_value_6\n    source_value_7",
+        "claimed_line_start": 6,
+        "claimed_line_end": 7,
+    },
+]
+
+
+GH_LEGACY_DIFF = (
+    "diff --git a/src/auth/session.py b/src/auth/session.py\n"
+    "--- a/src/auth/session.py\n+++ b/src/auth/session.py\n"
+    "@@ -42,1 +42,1 @@\n token = load_token()\n"
+    "@@ -88,5 +88,5 @@\n hash_password()\n save()\n verify()\n return token\n done()\n"
+    "diff --git a/src/api/routes.py b/src/api/routes.py\n"
+    "--- a/src/api/routes.py\n+++ b/src/api/routes.py\n"
+    '@@ -15,1 +15,1 @@\n     cursor.execute(f"SELECT * FROM users WHERE id = {uid}")\n'
+    "@@ -21,1 +21,1 @@\n list_users()\n"
+)
+GL_SHAPE_DIFF = (
+    "--- app/models/user.rb\n+++ app/models/user.rb\n"
+    "@@ -26,1 +26,2 @@\n existing\n+user.posts.each do |p|\n"
+    "--- app/controllers/sessions_controller.rb\n"
+    "+++ app/controllers/sessions_controller.rb\n"
+    "@@ -4,1 +4,2 @@\n existing\n+redirect_to_home\n"
+)
+
+FIDELITY = [
+    pytest.param(
+        GITHUB_EMPTY_FIXTURE,
+        "github",
+        [],
+        "",
+        "withastro",
+        "astro",
+        1234,
+        id="github-empty",
+    ),
+    pytest.param(
+        GITLAB_FIXTURE,
+        "gitlab",
+        GL_FINDINGS,
+        GL_SHAPE_DIFF,
+        "gitlab-org",
+        "gitlab",
+        999,
+        id="gitlab-modified-added-lines",
+    ),
+    pytest.param(
+        GITHUB_PREFIXED_PATH_FIXTURE,
+        "github",
+        GH_PREFIXED_PATH_FINDINGS,
+        GH_DIFF_PREFIXED_PATH,
+        "acme",
+        "widgets",
+        42,
+        id="github-resolved-path",
+    ),
+    pytest.param(
+        GITLAB_PREFIXED_PATH_FIXTURE,
+        "gitlab",
+        GL_PREFIXED_PATH_FINDINGS,
+        GL_DIFF_PREFIXED_PATH,
+        "acme",
+        "widgets",
+        7,
+        id="gitlab-resolved-path-and-old-side",
+    ),
+    pytest.param(
+        GITHUB_SKIPPED_SECTION_FIXTURE,
+        "github",
+        GH_SKIPPED_SECTION_FINDINGS,
+        GH_DIFF_PREFIXED_PATH,
+        "octo",
+        "gadgets",
+        101,
+        id="github-degraded-and-warning-order",
+    ),
+    pytest.param(
+        GITLAB_FENCED_SUGGESTION_FIXTURE,
+        "gitlab",
+        GL_FENCED_FINDINGS,
+        GL_DIFF_FENCED_SUGGESTION,
+        "octo",
+        "gadgets",
+        55,
+        id="gitlab-offsets-and-degraded-summary",
+    ),
+    pytest.param(
+        GITHUB_OVERLAP_DEMOTION_FIXTURE,
+        "github",
+        GH_OVERLAP_FINDINGS,
+        GH_DIFF_OVERLAP,
+        "acme",
+        "overlap",
+        223,
+        id="github-overlap-index-splitter",
+    ),
+    pytest.param(
+        GITLAB_OVERLAP_DEMOTION_FIXTURE,
+        "gitlab",
+        GL_OVERLAP_FINDINGS,
+        GL_DIFF_OVERLAP,
+        "acme",
+        "overlap",
+        223,
+        id="gitlab-overlap-and-disjoint-ranges",
+    ),
+]
+
+
+def capture(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    forge_factory,
+    platform,
+    findings,
+    raw_diff,
+    owner="withastro",
+    repo="astro",
+    number=1234,
+):
+    run = invoke_posting(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        forge_factory,
+        {
+            "owner": owner,
+            "repo": repo,
+            "pr_number": number,
+            "platform": platform,
+            "sha": _GH_SHA,
+            "review_body": "Automated review summary.",
+            "findings": [
+                {
+                    "admission": admitted_stamp(),
+                    "disposition": "deliver",
+                    **finding,
+                }
+                for finding in findings
+            ],
+        },
+        diff=raw_diff,
+        refs=JsonFetch(
+            [
+                {
+                    "base_commit_sha": _GL_BASE,
+                    "head_commit_sha": _GL_HEAD,
+                    "start_commit_sha": _GL_START,
+                }
+            ],
+            None,
+        ),
+    )
+    assert run.code == 0
+    assert run.requests == ()
+    assert run.head_calls == ()
+    assert forge_factory.calls == [(platform, None)]
+    assert [call.method for call in run.fake.calls] == (
+        ["diff", "ensure_available"]
+        if platform == "github"
+        else ["diff", "ensure_available", "ensure_available", "diff_refs"]
+    )
+    return run
+
+
+@pytest.mark.parametrize(
+    "fixture,platform,findings,raw_diff,owner,repo,number", FIDELITY
+)
+def test_fixture_fidelity(
+    fixture,
+    platform,
+    findings,
+    raw_diff,
+    owner,
+    repo,
+    number,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    forge_factory,
+):
+    run = capture(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        forge_factory,
+        platform,
+        findings,
+        raw_diff,
+        owner,
+        repo,
+        number,
+    )
+    expected_bytes = fixture.read_bytes()
+    assert run.payload == json.loads(expected_bytes)
+    # The committed fixtures have one final LF; the delivery writer has none.
+    assert run.raw + b"\n" == expected_bytes
+
+
+def test_legacy_fixture_projection(tmp_path, monkeypatch, capsys, forge_factory):
+    run = capture(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        forge_factory,
+        "github",
+        GH_COMMENT_FINDINGS,
+        GH_LEGACY_DIFF,
+    )
+    frozen = json.loads(GITHUB_FIXTURE.read_bytes())
+    assert (
+        run.payload["endpoint"]
+        == frozen["endpoint"]
+        == "repos/withastro/astro/pulls/1234/reviews"
+    )
+    assert run.payload["method"] == frozen["method"] == "POST"
+    assert run.payload["payload"]["event"] == frozen["payload"]["event"] == "COMMENT"
+    assert run.payload["payload"]["comments"] == []
+    body = run.payload["payload"]["body"]
+    assert body.count("location unconfirmed") == 4
+    assert "```suggestion" not in body
+    for finding in GH_COMMENT_FINDINGS:
+        assert finding["title"] in body
+
+
+def test_recorded_github_comments_match_delivery(
+    tmp_path, monkeypatch, capsys, forge_factory
+):
+    proofs = [
+        (42, 42, "token = load_token()"),
+        (88, 91, "hash_password()\nsave()\nverify()\nreturn token"),
+        (15, 15, '     cursor.execute(f"SELECT * FROM users WHERE id = {uid}")'),
+        (21, 21, "list_users()"),
+    ]
+    findings = [
+        {
+            **finding,
+            "line_start": start,
+            "line_end": end,
+            "location_status": "confirmed",
+            "anchor": anchor,
+            "claimed_line_start": finding["line"],
+            **(
+                {"claimed_line_end": finding["end_line"]}
+                if "end_line" in finding
+                else {}
+            ),
+        }
+        for finding, (start, end, anchor) in zip(
+            GH_COMMENT_FINDINGS, proofs, strict=True
+        )
+    ]
+    run = capture(
+        tmp_path, monkeypatch, capsys, forge_factory, "github", findings, GH_LEGACY_DIFF
+    )
+    frozen = json.loads(GITHUB_FIXTURE.read_bytes())
+    assert run.payload["payload"]["comments"] == frozen["payload"]["comments"]
+
+
+def test_fixture_inventory():
+    key_shapes = {
+        "github": {"platform", "endpoint", "method", "payload", "skipped"},
+        "gitlab": {"platform", "summary", "discussions", "skipped"},
+    }
+    fixtures = {
+        GITHUB_FIXTURE,
+        GITHUB_EMPTY_FIXTURE,
+        GITLAB_FIXTURE,
+        GITHUB_PREFIXED_PATH_FIXTURE,
+        GITLAB_PREFIXED_PATH_FIXTURE,
+        GITHUB_SKIPPED_SECTION_FIXTURE,
+        GITLAB_FENCED_SUGGESTION_FIXTURE,
+        GITHUB_OVERLAP_DEMOTION_FIXTURE,
+        GITLAB_OVERLAP_DEMOTION_FIXTURE,
+    }
+    assert set(FIXTURES.glob("*.json")) == fixtures
+    for fixture in fixtures:
+        frozen = json.loads(fixture.read_bytes())
+        assert set(frozen) == key_shapes[frozen["platform"]]
+
+
+@pytest.mark.parametrize(
+    "platform,raw_diff,surface,expected,error",
+    [
+        pytest.param(
+            "github",
+            GH_DIFF_PREFIXED_PATH,
+            "inline",
+            "**\U0001f7e0 [HIGH] Near limit**\n\n"
+            + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            + "\n\n"
+            "_[folded: 351 more bytes; this inline review comment reached the 500-byte GitHub body limit]_"
+            "\n\n\u2694\ufe0f *Code Gauntlet*",
+            "WARNING: Inline body folded by 351 bytes at src/edited.py:2: this inline review comment reached the 500-byte GitHub body limit.\n",
+            id="github-selected-folded-body",
+        ),
+        pytest.param(
+            "gitlab",
+            GL_DIFF_PREFIXED_PATH,
+            "discussion",
+            "**\U0001f7e0 [HIGH] Near limit**\n\n"
+            + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            + "\n\n"
+            "_[folded: 460 more bytes; this inline discussion reached the 500-byte GitLab body limit]_"
+            "\n\n\u2694\ufe0f *Code Gauntlet*",
+            "WARNING: Inline body folded by 460 bytes at src/edited.py:2: this inline discussion reached the 500-byte GitLab body limit.\n",
+            id="gitlab-live-marker-reserve-in-dry-run",
+        ),
+    ],
+)
+def test_folded_body_adapter(
+    platform,
+    raw_diff,
+    surface,
+    expected,
+    error,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    forge_factory,
+):
+    monkeypatch.setitem(
+        PLATFORM_BODY_LIMITS[platform]["surfaces"][surface], "bytes", 500
+    )
+    finding = {
+        "file": "b/src/edited.py",
+        "line": 2,
+        "severity": "high",
+        "title": "Near limit",
+        "body": "x" * 700,
+        "line_start": 2,
+        "line_end": 2,
+        "location_status": "confirmed",
+        "anchor": "    source_value_1",
+        "claimed_line_start": 2,
+    }
+    if platform == "gitlab":
+        finding["anchor"] = "added_line_1"
+    run = capture(
+        tmp_path, monkeypatch, capsys, forge_factory, platform, [finding], raw_diff
+    )
+    candidates, stats = payload_to_candidates(
+        tmp_path / "post-review-payload.json", GOLDEN_A
+    )
+    assert stats == {"n_candidates": 1, "n_skipped": 0}
+    assert candidates == {
+        GOLDEN_A: {
+            "deep-review": [
+                {
+                    "text": expected,
+                    "path": "src/edited.py",
+                    "line": 2,
+                    "source": "extracted",
+                }
+            ]
+        }
+    }
+    assert run.err == error
+
+
+@pytest.mark.parametrize(
+    "fixture,input_kind,tool,golden,count,skipped",
+    [
+        pytest.param(
+            GITHUB_FIXTURE,
+            "str",
+            "deep-review",
+            GOLDEN_A,
+            4,
+            2,
+            id="github-string-path-and-end-line",
+        ),
+        pytest.param(
+            GITHUB_FIXTURE,
+            "path",
+            "deep-review",
+            GOLDEN_A,
+            4,
+            2,
+            id="github-path-object",
+        ),
+        pytest.param(
+            GITHUB_FIXTURE,
+            "dict",
+            "deep-review-v2",
+            GOLDEN_A,
+            4,
+            2,
+            id="github-custom-tool",
+        ),
+        pytest.param(
+            GITHUB_EMPTY_FIXTURE,
+            "dict",
+            "deep-review",
+            GOLDEN_A,
+            0,
+            0,
+            id="empty-retains-tool-list",
+        ),
+        pytest.param(
+            GITLAB_FIXTURE,
+            "dict",
+            "deep-review",
+            GOLDEN_B,
+            2,
+            0,
+            id="gitlab-discussions-verbatim",
+        ),
+        pytest.param(
+            GITHUB_FIXTURE,
+            "dict",
+            "deep-review",
+            GOLDEN_A,
+            4,
+            2,
+            id="github-ordered-verbatim-comments",
+        ),
+    ],
+)
+def test_payload_conversion(fixture, input_kind, tool, golden, count, skipped):
+    frozen = json.loads(fixture.read_bytes())
+    source = (
+        str(fixture)
+        if input_kind == "str"
+        else fixture
+        if input_kind == "path"
+        else frozen
+    )
+    options = {} if tool == "deep-review" else {"tool": tool}
+    candidates, stats = payload_to_candidates(source, golden, **options)
+    assert stats == {"n_candidates": count, "n_skipped": skipped}
+    assert list(candidates) == [golden]
+    assert list(candidates[golden]) == [tool]
+    entries = candidates[golden][tool]
+    assert len(entries) == count
+    if fixture == GITLAB_FIXTURE:
+        expected = frozen["discussions"]
+        anchors = [
+            ("app/models/user.rb", 27),
+            ("app/controllers/sessions_controller.rb", 5),
+        ]
+    else:
+        expected = frozen["payload"]["comments"]
+        anchors = (
+            [
+                ("src/auth/session.py", 42),
+                ("src/auth/session.py", 91),
+                ("src/api/routes.py", 15),
+                ("src/api/routes.py", 21),
+            ]
+            if count
+            else []
+        )
+    for entry, comment, anchor in zip(entries, expected, anchors, strict=True):
+        assert entry == {
+            "text": comment["body"],
+            "path": anchor[0],
+            "line": anchor[1],
+            "source": "extracted",
+        }
+
+
+@pytest.mark.parametrize(
+    "source,error",
+    [
+        pytest.param({"platform": "bitbucket"}, ValueError, id="unknown-platform"),
+        pytest.param(1234, TypeError, id="non-payload-type"),
+    ],
+)
+def test_payload_errors(source, error):
+    with pytest.raises(error):
+        payload_to_candidates(source, GOLDEN_A)
+
+
+FIRST_EXPECTED = {"text": "first", "path": "src/a", "line": 92, "source": "extracted"}
+SECOND_EXPECTED = {"text": "second", "path": "src/b", "line": 27, "source": "extracted"}
+
+MERGED_TWO = {
+    GOLDEN_A: {"deep-review": [FIRST_EXPECTED]},
+    GOLDEN_B: {"deep-review": [SECOND_EXPECTED]},
+}
+
+
+MERGED_SAME = {
+    GOLDEN_A: {
+        "deep-review": [
+            FIRST_EXPECTED,
+            SECOND_EXPECTED,
+            FIRST_EXPECTED,
+        ]
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "case,expected,total",
+    [
+        pytest.param(
+            "paths",
+            MERGED_TWO,
+            2,
+            id="merge-two-files-keeps-golden-buckets",
+        ),
+        pytest.param(
+            "dicts",
+            MERGED_TWO,
+            2,
+            id="merge-dictionaries-in-input-order",
+        ),
+        pytest.param(
+            "same-url",
+            MERGED_SAME,
+            3,
+            id="merge-same-url-appends-in-order",
+        ),
+        pytest.param("empty", {}, 0, id="merge-empty"),
+    ],
+)
+def test_merge(case, expected, total, tmp_path):
+    first = {
+        GOLDEN_A: {
+            "deep-review": [
+                {"text": "first", "path": "src/a", "line": 92, "source": "extracted"}
+            ]
+        }
+    }
+    second = {
+        {
+            "paths": GOLDEN_B,
+            "dicts": GOLDEN_B,
+            "same-url": GOLDEN_A,
+            "empty": GOLDEN_B,
+        }[case]: {
+            "deep-review": [
+                {"text": "second", "path": "src/b", "line": 27, "source": "extracted"}
+            ]
+        }
+    }
+    sources = {
+        "paths": [first, second],
+        "dicts": [first, second],
+        "same-url": [first, second, first],
+        "empty": [],
+    }[case]
+    if case == "paths":
+        sources = [tmp_path / "first.json", tmp_path / "second.json"]
+        for path, data in zip(sources, [first, second], strict=True):
+            path.write_text(json.dumps(data), encoding="utf-8")
+    merged, stats = merge_candidates(sources)
+    assert stats == {"n_candidates": total, "n_skipped": 0}
+    assert merged == expected

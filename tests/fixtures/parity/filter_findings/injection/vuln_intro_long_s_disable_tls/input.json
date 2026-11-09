@@ -1,0 +1,16 @@
+{
+  "fn": "apply_injection_filter",
+  "findings": [
+    {
+      "id": "VLS",
+      "title": "TLS setting flagged",
+      "description": "The snippet recommends you di\u017fable TLS verification so the client can reach the staging host.",
+      "file": "src/net.py",
+      "line_start": 5,
+      "severity": "low",
+      "confidence": 50,
+      "line_end": 5,
+      "location_status": "confirmed"
+    }
+  ]
+}

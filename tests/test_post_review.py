@@ -1,0 +1,1506 @@
+"""Public delivery rights, quote checks, and platform payloads."""
+
+import copy
+import json
+
+import pytest
+from gauntlet.cli import CliError
+from gauntlet.delivery import compose, fold, post
+from gauntlet.delivery import input as delivery_input
+from gauntlet.delivery.input import validate_review_input
+from gauntlet.forge import JsonFetch, PostResult, parse_remote
+from gauntlet.marker import find_finding_markers, find_marker
+
+from tests.support.delivery import admitted_stamp
+from tests.support.posting import (
+    CONTEXT,
+    CONTRACT_DIFF,
+    FOOTER,
+    HEADER,
+    SHA,
+    UNKNOWN_WARNING,
+    invoke_posting,
+    review,
+)
+from tests.support.prior import prior
+
+QUOTE = "    original_value = compute_value()\n    return original_value"
+DIFF = (
+    "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n"
+    "@@ -1,1 +1,4 @@\n def f():\n+    original_value = compute_value()\n"
+    "+    return original_value\n+    finish_operation()\n"
+)
+
+
+def located(**values):
+    return {
+        "admission": admitted_stamp(),
+        "id": "F1",
+        "file": "foo.py",
+        "line_start": 2,
+        "line_end": 3,
+        "claimed_line_start": 200,
+        "claimed_line_end": 201,
+        "location_status": "relocated",
+        "disposition": "deliver",
+        "anchor": QUOTE,
+        "line": "conflicting alias",
+        "end_line": {"conflicting": "alias"},
+        "title": "Range bug",
+        "body": "The value is stale.",
+        "severity": "high",
+        "suggestion": "Return the current value.",
+        "suggested_fix_code": "    return current_value()",
+        **values,
+    }
+
+
+def test_body_task_permission_does_not_grant_patch_or_fence(posting, tmp_path, invoke):
+    from gauntlet.location import delivery_allows
+
+    from tests.support.delivery import patch_inputs
+
+    finding = located(disposition="body", body_fix_task_eligible=True)
+    assert delivery_allows(finding, "fixTask")
+    for platform in ("github", "gitlab"):
+        body, comments = surfaces(posting(review(platform, [finding]), diff=DIFF))
+        assert not comments
+        assert "```suggestion" not in body
+    (tmp_path / "foo.py").write_text(
+        "def f():\n" + QUOTE + "\n", encoding="utf-8", newline=""
+    )
+    patch_inputs(tmp_path, [finding], DIFF.encode())
+    result = invoke(
+        "report_patches",
+        ["--output-dir", str(tmp_path), "--head-sha", "abc1234"],
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["kept"] == 0
+    assert "return current_value()" not in (
+        tmp_path / "code-gauntlet-patches-abc1234.md"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def posting(tmp_path, monkeypatch, capsys, forge_factory):
+    def run(data, **options):
+        return invoke_posting(
+            tmp_path, monkeypatch, capsys, forge_factory, data, **options
+        )
+
+    return run
+
+
+def surfaces(run):
+    payload = run.payload
+    assert run.code == 0, run.err
+    assert payload is not None
+    if payload["platform"] == "github":
+        return payload["payload"]["body"], payload["payload"]["comments"]
+    return payload["summary"]["body"], payload["discussions"]
+
+
+@pytest.mark.parametrize("primary_disposition", ["deliver", "body"])
+def test_gitlab_same_sha_summary_only_extends_inline_issue_sites(
+    posting, primary_disposition
+):
+    primary = located(disposition=primary_disposition)
+    body = located(
+        id="BODY",
+        disposition="body",
+        title="Body finding",
+        body="Original body finding.",
+        delivery_group={
+            "issue_key": "body",
+            "lead_id": "BODY",
+            "finding_ids": ["BODY"],
+        },
+    )
+    first = posting(review("gitlab", [primary, body]), diff=DIFF, dry_run=False)
+    assert first.code == 0
+    notes = [
+        {"id": 10 + i, "author": {"username": "poster"}, "body": r.payload["body"]}
+        for i, r in enumerate(first.requests)
+    ]
+    reworded = {**body, "body": "Reworded body finding on the same commit."}
+    rerun = posting(
+        review("gitlab", [primary, reworded]),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert rerun.code == 0 and rerun.requests == ()
+    assert "already on the MR" in rerun.out
+    extra = {
+        "file": "new-site.txt",
+        "line_start": 1,
+        "line_end": 1,
+        "anchor": "quote",
+        "location_status": "confirmed",
+        "diff_validation": {"in_diff": False},
+    }
+    extended = [{**primary, "sites": [extra]}, reworded]
+    update = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert update.code == 0
+    if primary_disposition == "body":
+        assert update.requests == ()
+        return
+    assert len(update.requests) == 1
+    request = update.requests[0]
+    assert request.method == "PUT" and request.endpoint.endswith("/notes/10")
+    assert request.payload["body"].count("new-site.txt") == 1
+    assert "Reworded body finding" not in request.payload["body"]
+    notes[0]["body"] = request.payload["body"]
+    repeated = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert repeated.code == 0 and repeated.requests == ()
+
+
+@pytest.mark.parametrize("summary_posted", [False, True])
+def test_gitlab_member_marker_routes_missing_primary_to_summary_once(
+    posting, summary_posted
+):
+    primary = located(consolidation_key="issue", consolidation_primary=True)
+    member = located(
+        id="M",
+        title="Existing member",
+        consolidation_key="issue",
+        line_start=4,
+        line_end=4,
+        anchor="finish_operation()",
+    )
+    member_key = compose.finding_key(
+        "foo.py", 4, member["title"], compose.key_material_body(member)
+    )
+    primary_key = compose.finding_key(
+        "foo.py", 2, primary["title"], compose.key_material_body(primary)
+    )
+    notes = prior(member_key, summary=summary_posted).payload
+    for i, note in enumerate(notes):
+        note["id"] = 10 + i
+    data = review("gitlab", [primary, member])
+    run = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(notes, None))
+    assert run.code == 0, run.err
+    assert len(run.requests) == 1
+    request = run.requests[0]
+    assert request.method == ("PUT" if summary_posted else "POST")
+    assert request.endpoint.endswith("/notes/10" if summary_posted else "/notes")
+    body = request.payload["body"]
+    assert primary["title"] in body and primary["body"] in body
+    assert member["title"] not in body and "```suggestion" not in body
+    assert [marker["key"] for marker in find_finding_markers(body)] == [primary_key]
+    if summary_posted:
+        notes[0]["body"] = body
+    else:
+        notes.append({"id": 20, "author": {"username": "poster"}, "body": body})
+    repeated = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(notes, None))
+    assert repeated.code == 0 and repeated.requests == ()
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing-id", "bool-id", "negative-id", "over-limit"]
+)
+def test_gitlab_summary_extension_failure_preserves_retryable_coverage(
+    posting, failure
+):
+    primary = located()
+    previous = located(
+        id="B",
+        disposition="body",
+        title="Earlier body finding",
+        body="Keep this original finding.",
+    )
+    first = posting(review("gitlab", [primary, previous]), diff=DIFF, dry_run=False)
+    assert first.code == 0
+    notes = [
+        {"id": 10 + i, "author": {"username": "poster"}, "body": r.payload["body"]}
+        for i, r in enumerate(first.requests)
+    ]
+    broken = copy.deepcopy(notes)
+    if failure == "missing-id":
+        broken[0].pop("id")
+    elif failure == "bool-id":
+        broken[0]["id"] = True
+    elif failure == "negative-id":
+        broken[0]["id"] = -1
+    else:
+        body = broken[0]["body"]
+        limit = fold.body_limit("gitlab", "summary").bytes
+        broken[0]["body"] = "x" * (limit - fold.utf8_len(body)) + body
+    snapshot = copy.deepcopy(broken)
+    site = {
+        "file": "new-site.txt",
+        "line_start": 1,
+        "line_end": 1,
+        "anchor": "quote",
+        "location_status": "confirmed",
+        "diff_validation": {"in_diff": False},
+    }
+    data = review("gitlab", [{**primary, "sites": [site]}, previous])
+    failed = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(broken, None))
+    assert failed.code == 1 and failed.requests == ()
+    assert broken == snapshot
+    expected = (
+        "Updated summary exceeds the body limit; new coverage remains retryable."
+        if failure == "over-limit"
+        else "Existing summary has no usable note ID; new coverage remains unresolved."
+    )
+    assert expected in failed.err
+    retry = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(notes, None))
+    assert retry.code == 0 and len(retry.requests) == 1
+    request = retry.requests[0]
+    assert request.method == "PUT" and request.endpoint.endswith("/notes/10")
+    assert "Keep this original finding." in request.payload["body"]
+    assert request.payload["body"].count("new-site.txt") == 1
+    notes[0]["body"] = request.payload["body"]
+    repeated = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(notes, None))
+    assert repeated.code == 0 and repeated.requests == ()
+
+
+def test_group_retry_is_atomic(posting):
+    from tests.test_outbound_delivery import (
+        _assert_prepared_poison,
+        _poisoned_outbound_sinks_finding,
+    )
+
+    stamp = {"issue_key": "issue", "lead_id": "P", "finding_ids": ["P", "M"]}
+    primary = located(
+        **{
+            **_poisoned_outbound_sinks_finding(primary=True),
+            "id": "P",
+            "file": "foo.py",
+            "line_start": 2,
+            "line_end": 3,
+            "anchor": QUOTE,
+            "delivery_group": stamp,
+        }
+    )
+    member = located(
+        **{
+            **_poisoned_outbound_sinks_finding(),
+            "id": "M",
+            "file": "foo.py",
+            "line_start": 4,
+            "line_end": 4,
+            "anchor": "finish_operation()",
+            "delivery_group": stamp,
+        }
+    )
+    sites = [
+        {
+            "file": f"extra-{n}.txt",
+            "line_start": n,
+            "line_end": n,
+            "anchor": "quote",
+            "location_status": "confirmed",
+            "diff_validation": {"in_diff": False},
+        }
+        for n in range(1, 5)
+    ]
+    primary["sites"] = sites
+    key_before = compose.key_material_body(primary)
+    assert compose.key_material_body({**primary, "sites": []}) == key_before
+    for platform in ("github", "gitlab"):
+        run = posting(review(platform, [primary, member]), diff=DIFF)
+        _, comments = surfaces(run)
+        assert len(comments) == 1
+        assert comments[0]["body"].count("extra-") == 4
+        assert comments[0]["body"].count("Corroborating finding") == 1
+        assert "```suggestion" not in comments[0]["body"]
+        assert not any(call.method == "review_entries" for call in run.fake.calls)
+    # Membership selects a stamped primary even when a legacy stamp disagrees.
+    reordered = {**stamp, "finding_ids": ["M", "P"]}
+    selected = posting(
+        review(
+            "github",
+            [
+                {**member, "delivery_group": reordered, "consolidation_primary": True},
+                {
+                    **primary,
+                    "delivery_group": reordered,
+                    "consolidation_primary": False,
+                },
+            ],
+        ),
+        diff=DIFF,
+    )
+    assert selected.payload["payload"]["comments"][0]["line"] == 3
+    missing = {**stamp, "finding_ids": ["P", "M", "N"]}
+    fallback = posting(
+        review(
+            "github",
+            [
+                {**primary, "id": "N", "delivery_group": missing},
+                {**member, "delivery_group": missing},
+            ],
+        ),
+        diff=DIFF,
+    )
+    assert fallback.payload["payload"]["comments"][0]["line"] == 4
+    first = posting(review("gitlab", [primary, member]), diff=DIFF, dry_run=False)
+    assert first.code == 0
+    summary, discussion = first.requests
+    discussion_body = discussion.payload["body"]
+    markers = find_finding_markers(discussion_body)
+    member_keys = [
+        compose.finding_key(
+            "foo.py", line, post.prepare_line(f["title"]), compose.key_material_body(f)
+        )
+        for f, line in ((primary, 2), (member, 4))
+    ]
+    assert len(markers) == 2
+    import re
+
+    def assert_poison(body):
+        _assert_prepared_poison(
+            re.sub(r"<!-- code-gauntlet-coverage: .*? -->", "", body),
+            find_finding_markers(body),
+        )
+
+    assert_poison(discussion_body)
+    notes = [
+        {"id": 10, "author": {"username": "poster"}, "body": summary.payload["body"]},
+        {"id": 11, "author": {"username": "poster"}, "body": discussion_body},
+    ]
+    for error in ("denied", "timeout after create"):
+        failed = posting(
+            review("gitlab", [primary, member]),
+            diff=DIFF,
+            dry_run=False,
+            submissions=[PostResult({}, None, None), PostResult(None, error, None)],
+        )
+        assert failed.code == 1
+        assert len(failed.requests) == 2
+        assert failed.requests[-1].endpoint.endswith("/discussions")
+        assert_poison(failed.requests[-1].payload["body"])
+    reconciled = posting(
+        review("gitlab", [primary, member]),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert reconciled.code == 0 and reconciled.requests == ()
+    restamped = {**stamp, "issue_key": "recomputed-issue"}
+    same_issue = posting(
+        review(
+            "gitlab",
+            [{**finding, "delivery_group": restamped} for finding in (primary, member)],
+        ),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert same_issue.code == 0 and same_issue.requests == ()
+    for present in (0, 1):
+        partial = [
+            {**notes[0]},
+            {**notes[1], "body": post.build_finding_marker(SHA, member_keys[present])},
+        ]
+        run = posting(
+            review("gitlab", [primary, member]),
+            diff=DIFF,
+            dry_run=False,
+            entries=JsonFetch(partial, None),
+        )
+        assert run.code == 0
+        assert len(run.requests) == 1
+        request = run.requests[0]
+        assert request.method == "PUT" and request.endpoint.endswith("/notes/10")
+        assert "position" not in request.payload
+        body = request.payload["body"]
+        assert_poison(body)
+        assert member_keys[0] in body and member_keys[1] not in body
+        assert all(site["file"] in body for site in sites)
+        assert "@ghost" not in body and "<!-- code-gauntlet-findings:" in body
+        assert "~~~suggestion" not in body
+        if present == 1:
+            assert post.prepare_line(primary["title"]) in body
+            partial[0]["body"] = body
+            repeated = posting(
+                review("gitlab", [primary, member]),
+                diff=DIFF,
+                dry_run=False,
+                entries=JsonFetch(partial, None),
+            )
+            assert repeated.code == 0 and repeated.requests == ()
+    legacy = [
+        notes[0],
+        {
+            **notes[1],
+            "body": "Corroborating finding — member\n"
+            + post.build_finding_marker(SHA, member_keys[0]),
+        },
+    ]
+    legacy_run = posting(
+        review("gitlab", [primary, member]),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(legacy, None),
+    )
+    assert legacy_run.code == 0 and all(r.method == "PUT" for r in legacy_run.requests)
+    extra = {**sites[-1], "file": "new-site.txt"}
+    extended = [{**primary, "sites": [*sites, extra]}, member]
+    update = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert update.code == 0 and len(update.requests) == 1
+    assert update.requests[0].method == "PUT"
+    assert update.requests[0].payload["body"].count("new-site.txt") == 1
+    assert "extra-1.txt" not in update.requests[0].payload["body"]
+    updated_notes = [{**notes[0], "body": update.requests[0].payload["body"]}, notes[1]]
+    again = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(updated_notes, None),
+    )
+    assert again.requests == ()
+    failed_update = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+        submissions=[PostResult(None, "denied", None)],
+    )
+    assert failed_update.code == 1
+    retry = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert retry.requests == failed_update.requests
+    unreadable = posting(
+        review("gitlab", extended),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(None, "history unreadable"),
+    )
+    assert unreadable.code == 0 and len(unreadable.requests) == 2
+    assert "history unreadable" in unreadable.err and "posting them" in unreadable.err
+
+
+@pytest.mark.parametrize(
+    "platform,stamp,status",
+    [
+        ("github", "deliver", "confirmed"),
+        ("gitlab", "body", "confirmed"),
+        ("github", "held_back", "confirmed"),
+        ("gitlab", "report_only", "confirmed"),
+        ("github", "eliminate", "confirmed"),
+        ("gitlab", None, "confirmed"),
+        ("github", "unknown", "confirmed"),
+        ("github", "deliver", "unconfirmed"),
+    ],
+)
+def test_disposition_location_surfaces(posting, platform, stamp, status):
+    member = located(disposition=stamp, location_status=status, title="Private claim")
+    if stamp is None:
+        member.pop("disposition")
+    before = copy.deepcopy(member)
+    findings = [member]
+    if stamp is None:
+        findings.append(located(id="held", disposition="held_back"))
+    summary, comments = surfaces(
+        posting(review(platform, findings, review_body=""), diff=DIFF)
+    )
+    assert member == before
+    assert len(comments) == int(stamp == "deliver" and status == "confirmed")
+    assert (
+        "Private claim" in summary
+        or any("Private claim" in c["body"] for c in comments)
+    ) == (stamp in ("deliver", "body"))
+    assert "```suggestion" not in summary
+    assert ("```suggestion" in compose.render_finding_sections(member)) == (
+        stamp == "deliver" and status == "confirmed"
+    )
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_legacy_file_without_disposition_is_held_back(posting, platform):
+    findings = [
+        located(title="Confirmed claim"),
+        located(id="U", title="Unconfirmed claim", location_status="unconfirmed"),
+        {
+            "file": "foo.py",
+            "line": 2,
+            "end_line": 3,
+            "title": "Legacy aliases",
+            "body": "Caller supplied body",
+        },
+    ]
+    for finding in findings:
+        finding.pop("disposition", None)
+    data = review(platform, findings, review_body="")
+    before = copy.deepcopy(data)
+    summary, comments = surfaces(posting(data, diff=DIFF))
+    assert data == before
+    assert comments == []
+    assert "Confirmed claim" not in summary and "Legacy aliases" not in summary
+    assert "```suggestion" not in summary
+
+
+@pytest.mark.parametrize(
+    "admission",
+    [
+        None,
+        {},
+        "admitted",
+        {**admitted_stamp(), "version": 2},
+        {**admitted_stamp(), "version": True},
+        {k: v for k, v in admitted_stamp().items() if k != "input_proof"},
+        {**admitted_stamp(), "input_proof": 1},
+        {**admitted_stamp(), "input_proof": ""},
+        {**admitted_stamp(), "reasons": "none"},
+        {**admitted_stamp(), "reasons": [None]},
+        {**admitted_stamp(), "input_fields": [1]},
+        {**admitted_stamp(), "tier": "unknown"},
+    ],
+)
+def test_malformed_admission_cannot_enter_confirmed_delivery(posting, admission):
+    member = located(admission=admission)
+    data = review(findings=[member], review_body="")
+    assert validate_review_input(data)["findings"][0]["disposition"] == "held_back"
+    summary, comments = surfaces(posting(data, diff=DIFF))
+    assert comments == []
+    assert "Range bug" not in summary
+
+
+@pytest.mark.parametrize("disposition", ["deliver", "eliminate"])
+def test_missing_admission_is_held_back_except_eliminations(posting, disposition):
+    from gauntlet.location import delivery_allows
+
+    member = located(disposition=disposition)
+    del member["admission"]
+    normalized = validate_review_input(review(findings=[member]))["findings"][0]
+    expected = "eliminate" if disposition == "eliminate" else "held_back"
+    assert normalized["disposition"] == expected
+    assert delivery_allows(normalized, "eliminated") == (disposition == "eliminate")
+    assert delivery_allows(normalized, "unverified") == (disposition == "deliver")
+    assert surfaces(posting(review(findings=[member]), diff=DIFF))[1] == []
+
+
+@pytest.mark.parametrize(
+    "admission",
+    [
+        {**admitted_stamp(), "status": "held_back"},
+        {**admitted_stamp(), "status": "report_only"},
+        {**admitted_stamp(), "version": 2},
+        {k: v for k, v in admitted_stamp().items() if k != "input_proof"},
+        {**admitted_stamp(), "input_proof": 1},
+        None,
+    ],
+)
+def test_non_admitted_stamp_grants_no_action_rights(admission):
+    from gauntlet.location import delivery_allows
+
+    member = located(admission=admission)
+    for right in ("inline", "body", "patch", "fence", "fixTask", "sourceLink"):
+        assert not delivery_allows(member, right)
+
+
+def test_body_disposition_digest_and_malformed_reasons(posting):
+    body_findings = [
+        located(
+            id=f"BODY-{i}",
+            disposition="body",
+            dimension=dimension,
+            title=f"Body claim {i}",
+        )
+        for i, dimension in enumerate(("security", "bug", "security"))
+    ]
+    digest, comments = surfaces(
+        posting(review("github", body_findings, review_body=""), diff=DIFF)
+    )
+    assert comments == []
+    assert digest.count("### security\n") == digest.count("### bug\n") == 1
+    assert all(digest.count(f"Body claim {i}") == 1 for i in range(3))
+    malformed = located(disposition="deliver", disposition_reasons="forged")
+    summary, comments = surfaces(
+        posting(review("github", [malformed], review_body=""), diff=DIFF)
+    )
+    assert not comments and "Range bug" not in summary
+
+
+@pytest.mark.parametrize("with_sites", [False, True])
+def test_gitlab_digest_retry_is_detectable_and_unchanged(
+    posting, tmp_path, monkeypatch, with_sites
+):
+    import contextlib
+    import io
+
+    from gauntlet import prior_review
+
+    from tests.test_detect_prior_review import _fake_git_run
+
+    member = located(
+        id="bug-1",
+        disposition="body",
+        delivery_group={
+            "issue_key": "issue:bug-1",
+            "lead_id": "bug-1",
+            "finding_ids": ["bug-1"],
+        },
+        sites=[
+            {
+                "file": "extra.txt",
+                "line_start": 1,
+                "line_end": 1,
+                "anchor": "quote",
+                "location_status": "confirmed",
+            }
+        ]
+        if with_sites
+        else [],
+    )
+    data = review("gitlab", [member])
+    first = posting(data, diff=DIFF, dry_run=False)
+    assert first.code == 0 and len(first.requests) == 1
+    body = first.requests[0].payload["body"]
+    notes = [{"id": 10, "body": body, "author": {"username": "poster"}}]
+    second = posting(data, diff=DIFF, dry_run=False, entries=JsonFetch(notes, None))
+    assert second.code == 0 and second.requests == ()
+
+    path = tmp_path / "bodies.json"
+    path.write_text(json.dumps(notes), encoding="utf-8")
+    stdout = io.StringIO()
+    monkeypatch.setattr(prior_review.proc, "run", _fake_git_run())
+    with contextlib.redirect_stdout(stdout):
+        code = prior_review.CLI.invoke(
+            ["--platform", "gitlab", "--bodies-file", str(path)]
+        )
+    result = json.loads(stdout.getvalue())
+    assert code == 0 and result["previously_reviewed"] is True
+    assert result["signal"] == "marker"
+    assert find_marker(body)["sha"] == SHA
+    assert body.endswith(FOOTER.replace("{count}", "1"))
+
+
+def test_gitlab_recycled_agent_id_posts_a_different_issue(posting):
+    member = located(
+        id="bug-1",
+        delivery_group={
+            "issue_key": "issue:bug-1",
+            "lead_id": "bug-1",
+            "finding_ids": ["bug-1"],
+        },
+    )
+    first = posting(review("gitlab", [member]), diff=DIFF, dry_run=False)
+    notes = [
+        {
+            "id": index + 10,
+            "body": request.payload["body"],
+            "author": {"username": "poster"},
+        }
+        for index, request in enumerate(first.requests)
+    ]
+    second = posting(
+        review(
+            "gitlab",
+            [{**member, "title": "A different issue", "body": "A different failure"}],
+        ),
+        diff=DIFF,
+        dry_run=False,
+        entries=JsonFetch(notes, None),
+    )
+    assert second.code == 0 and len(second.requests) == 1
+    assert second.requests[0].endpoint.endswith("/discussions")
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+@pytest.mark.parametrize("status", [None, "unknown", "unconfirmed"])
+@pytest.mark.parametrize("primary", [False, True])
+def test_unconfirmed_delivery_is_summary_only(platform, status, primary, posting):
+    unresolved = located(
+        id="U",
+        title="Unresolved observation",
+        location_status=status,
+        consolidation_key="k",
+        consolidation_primary=primary,
+    )
+    if status is None:
+        unresolved.pop("location_status")
+    resolved = located(consolidation_key="k", consolidation_primary=not primary)
+    data = review(platform, [resolved, unresolved])
+    before = copy.deepcopy(data)
+    normalized = validate_review_input(data)
+    assert data == before
+    assert "line" not in normalized["findings"][1]
+    summary, comments = surfaces(posting(data, diff=DIFF))
+    assert len(comments) == int(not primary)
+    if primary:
+        assert "Unresolved observation" in summary
+        assert "foo.py (location unconfirmed)" in summary
+    else:
+        assert "Unresolved observation" not in summary
+        assert "Unresolved observation" in comments[0]["body"]
+    assert "```suggestion" not in summary
+    assert "998" not in summary and "999" not in summary and "200" not in summary
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+@pytest.mark.parametrize("anchor", [None, "another_source_value()", "original_value"])
+def test_wrong_quote_cannot_authorize_inline(platform, anchor, posting):
+    summary, comments = surfaces(
+        posting(review(platform, [located(anchor=anchor)]), diff=DIFF)
+    )
+    assert comments == []
+    assert "location unconfirmed" in summary
+    assert "Range bug" in summary and "Return the current value." in summary
+    assert "```suggestion" not in summary
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+@pytest.mark.parametrize("status", ["confirmed", "relocated"])
+def test_fragment_posts_inline_without_fence(platform, status, posting):
+    member = located(
+        location_status=status,
+        line_end=2,
+        anchor="  compute_value()  ",
+        claimed_line_end=200,
+    )
+    summary, comments = surfaces(posting(review(platform, [member]), diff=DIFF))
+    assert len(comments) == 1
+    comment = comments[0]
+    assert (comment.get("position") or comment)[
+        "new_line" if platform == "gitlab" else "line"
+    ] == 2
+    assert "```suggestion" not in comment["body"]
+    assert "Return the current value." in comment["body"]
+    assert "location unconfirmed" not in summary
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_canonical_quote_controls_range_and_fence(platform, posting):
+    _, comments = surfaces(posting(review(platform, [located()]), diff=DIFF))
+    comment = comments[0]
+    if platform == "github":
+        assert {k: v for k, v in comment.items() if k != "body"} == {
+            "path": "foo.py",
+            "start_line": 2,
+            "start_side": "RIGHT",
+            "line": 3,
+            "side": "RIGHT",
+        }
+        assert "```suggestion\n    return current_value()\n```" in comment["body"]
+    else:
+        assert comment["position"] == {
+            "position_type": "text",
+            "base_sha": "base1",
+            "head_sha": "head1",
+            "start_sha": "start1",
+            "new_path": "foo.py",
+            "new_line": 2,
+            "old_path": "foo.py",
+        }
+        assert "```suggestion:-0+1\n    return current_value()\n```" in comment["body"]
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_missing_diff_keeps_observation_in_body(platform, posting):
+    summary, comments = surfaces(
+        posting(review(platform, [located()]), diff_status=128, diff_error="denied")
+    )
+    assert not comments
+    assert "#### `foo.py:2`" in summary and "Range bug" in summary
+    assert "```suggestion" not in summary
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+@pytest.mark.parametrize("status", ["confirmed", "relocated"])
+@pytest.mark.parametrize("start,end", [(40, 41), (4, 5)])
+def test_off_diff_location_keeps_canonical_body_heading(
+    platform, status, start, end, posting
+):
+    run = posting(
+        review(
+            platform,
+            [located(location_status=status, line_start=start, line_end=end)],
+        ),
+        diff=DIFF,
+    )
+    summary, comments = surfaces(run)
+    assert comments == []
+    assert f"#### `foo.py:{start}`" in summary
+    assert "```suggestion" not in summary
+    assert "line not found in diff" in run.err
+
+
+def test_off_diff_group_warning_lists_valid_lines_and_members(posting):
+    primary = located(
+        line_start=40,
+        line_end=41,
+        consolidation_key="k",
+        consolidation_primary=True,
+    )
+    member = located(id="F2", title="Member", consolidation_key="k")
+    for finding in (primary, member):
+        finding.pop("suggested_fix_code")
+    run = posting(review("github", [primary, member]), diff=DIFF)
+    assert run.payload["skipped"] == [
+        "Skipping finding 'Range bug' at foo.py:40 \u2014 line not found in diff."
+        " Valid lines for this file: [1, 2, 3, 4] [group members: F1, F2]"
+    ]
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_overlap_withholds_only_later_fence(platform, posting):
+    second = located(
+        id="F2",
+        title="Second",
+        line_start=3,
+        line_end=4,
+        anchor="    return original_value\n    finish_operation()",
+    )
+    _, comments = surfaces(posting(review(platform, [located(), second]), diff=DIFF))
+    assert len(comments) == 2
+    assert "```suggestion" in comments[0]["body"]
+    assert "```suggestion" not in comments[1]["body"]
+    assert "Return the current value." in comments[1]["body"]
+
+
+def test_gitlab_legacy_group_rerun_skips_render_and_count(posting):
+    primary = located(consolidation_key="k", consolidation_primary=True)
+    member = located(
+        id="F2",
+        title="Member",
+        line_start=4,
+        line_end=4,
+        anchor="finish_operation()",
+        consolidation_key="k",
+    )
+    range_key = compose.finding_key(
+        "foo.py", 2, primary["title"], compose.key_material_body(primary)
+    )
+    run = posting(
+        review("gitlab", [primary, member]),
+        diff=DIFF,
+        dry_run=False,
+        entries=prior(range_key, legacy=(range_key,)),
+    )
+    assert run.code == 0
+    assert run.requests == ()
+    assert "1 inline discussion(s) already on the MR" in run.out
+    assert "suggested fix(es)" not in run.out
+
+
+def test_gitlab_rerun_keys_resolved_path(posting):
+    member = located(file="b/foo.py")
+    key = compose.finding_key(
+        "foo.py", 2, member["title"], compose.key_material_body(member)
+    )
+    run = posting(
+        review("gitlab", [member]),
+        diff=DIFF,
+        dry_run=False,
+        entries=prior(key),
+    )
+    assert run.code == 0 and run.requests == ()
+
+
+def test_gitlab_rerun_suppresses_fold_notice(posting, monkeypatch):
+    monkeypatch.setitem(
+        fold.PLATFORM_BODY_LIMITS["gitlab"]["surfaces"]["discussion"], "bytes", 500
+    )
+    member = located(body="X" * 1000)
+    key = compose.finding_key(
+        "foo.py", 2, member["title"], compose.key_material_body(member)
+    )
+    run = posting(
+        review("gitlab", [member]),
+        diff=DIFF,
+        dry_run=False,
+        entries=prior(key),
+    )
+    assert run.code == 0 and run.requests == () and run.err == ""
+
+
+@pytest.mark.parametrize("platform,limit", [("github", 65536), ("gitlab", 1000000)])
+def test_summary_envelope_blocks_submission(platform, limit, posting, monkeypatch):
+    monkeypatch.setattr(
+        compose,
+        "compose_review_body",
+        lambda *args, **kwargs: compose.ComposedBody(
+            "\u754c" * (limit // 3 + 1), 0, 0, 0, (), ()
+        ),
+    )
+    run = posting(review(platform), dry_run=False)
+    assert run.code == 1 and run.requests == ()
+    assert "body limit; nothing was posted" in run.err
+
+
+def test_existing_gitlab_summary_suppresses_guard_and_notices(posting, monkeypatch):
+    monkeypatch.setattr(
+        compose,
+        "compose_review_body",
+        lambda *args, **kwargs: compose.ComposedBody(
+            "\u754c" * 333334,
+            0,
+            1,
+            100,
+            (compose.OmittedEntry("foo.py:40", "Range bug"),),
+            (),
+        ),
+    )
+    run = posting(review("gitlab"), dry_run=False, entries=prior())
+    assert run.code == 0 and run.requests == () and run.err == ""
+    assert "body limit" not in run.out
+
+
+def test_gitlab_summary_reports_omission_after_capture(posting):
+    run = posting(
+        review(
+            "gitlab",
+            [located(line_start=40, line_end=41)],
+            review_body="X" * 1000000,
+        ),
+        diff=DIFF,
+    )
+    summary, _ = surfaces(run)
+    assert "[folded:" in summary and "Range bug" not in summary
+    assert "Skipped finding 'Range bug' at foo.py:40 not shown" in run.err
+    assert run.out.index("MR summary note captured") < run.out.index(
+        "1 skipped finding(s) not shown"
+    )
+    assert "review_body folded by" in run.out
+
+
+def test_gitlab_envelope_checked_before_dedup_keeps_sibling(posting, monkeypatch):
+    monkeypatch.setitem(
+        fold.PLATFORM_BODY_LIMITS["gitlab"]["surfaces"]["discussion"], "bytes", 200
+    )
+    primary = located(body="X" * 500)
+    key = compose.finding_key(
+        "foo.py", 2, primary["title"], compose.key_material_body(primary)
+    )
+    run = posting(
+        review("gitlab", [primary, CONTEXT]),
+        diff=DIFF + CONTRACT_DIFF,
+        dry_run=False,
+        entries=prior(key),
+    )
+    assert run.code == 0
+    assert len(run.requests) == 1
+    assert run.requests[0].payload["position"]["new_path"] == "src/edited.py"
+    assert "body limit; skipping this delivery" in run.err
+
+
+@pytest.mark.parametrize("platform,limit", [("github", 65536), ("gitlab", 1000000)])
+def test_summary_folding_preserves_footer(platform, limit, posting):
+    run = posting(
+        review(
+            platform,
+            [located(location_status="unconfirmed")],
+            review_body="X" * (limit + 100),
+        )
+    )
+    summary, comments = surfaces(run)
+    assert not comments
+    assert len(summary.encode()) <= limit
+    assert "[folded:" in summary
+    assert "Reviewed up to: " + SHA in summary
+
+
+@pytest.mark.parametrize(
+    "platform,surface", [("github", "inline"), ("gitlab", "discussion")]
+)
+def test_oversized_inline_is_not_submitted(platform, surface, posting, monkeypatch):
+    monkeypatch.setitem(
+        fold.PLATFORM_BODY_LIMITS[platform]["surfaces"][surface], "bytes", 100
+    )
+    run = posting(review(platform, [located(body="X" * 500)]), diff=DIFF, dry_run=False)
+    assert all(not r.endpoint.endswith("/discussions") for r in run.requests)
+    if platform == "github":
+        assert run.code == 1 and not run.requests
+    else:
+        assert run.code == 1 and len(run.requests) == 1
+    assert "body limit" in run.err
+
+
+@pytest.mark.parametrize("refs", [JsonFetch([], None), JsonFetch(None, "denied")])
+def test_gitlab_version_failure_posts_nothing(refs, posting):
+    run = posting(review("gitlab", [located()]), diff=DIFF, refs=refs, dry_run=False)
+    assert run.code == 1 and not run.requests
+
+
+_INVALID_ADMISSION_METADATA: list[tuple[dict[str, object], str]] = [
+    ({"test_kind": "unknown"}, "test_kind"),
+    ({"test_kind": []}, "test_kind"),
+    ({"quality_basis": "unknown"}, "quality_basis"),
+    ({"origin_dimension": []}, "origin_dimension"),
+    ({"effective_test_kind": "additional_case"}, "effective_test_kind"),
+]
+
+
+def test_policy_subject_stamps_follow_registry_rows(monkeypatch):
+    rows = copy.deepcopy(delivery_input.DIMENSION_ROWS)
+    rows[0]["policySubjects"]["ordinary"] = {
+        "stamp": "effective_quality_basis",
+        "kind": "duplication",
+    }
+    monkeypatch.setattr(delivery_input, "DIMENSION_ROWS", rows)
+    data = review(findings=[located(effective_quality_basis="duplication")])
+    assert (
+        validate_review_input(data)["findings"][0]["effective_quality_basis"]
+        == "duplication"
+    )
+    data["findings"][0]["effective_quality_basis"] = "other"
+    with pytest.raises(CliError, match="effective_quality_basis is invalid"):
+        validate_review_input(data)
+
+
+@pytest.mark.parametrize(
+    "data,message",
+    [
+        ({"owner": [], "repo": "r", "pr_number": 1}, "owner must be a string"),
+        ({"owner": "o", "repo": "r", "pr_number": True}, "pr_number must be"),
+        (
+            {"owner": "o", "repo": "r", "pr_number": 1, "findings": [None]},
+            "must be an object",
+        ),
+        *(
+            (review(findings=[located(**metadata)]), field + " is invalid")
+            for metadata, field in _INVALID_ADMISSION_METADATA
+        ),
+    ],
+)
+def test_invalid_review_input(data, message, posting):
+    run = posting(data)
+    assert run.code == 1 and message in run.err and not run.requests
+
+
+def test_capture_is_repeatable_and_preserves_input(posting, tmp_path):
+    data = review(findings=[located()])
+    first = posting(data, diff=DIFF)
+    second = posting(data, diff=DIFF)
+    assert first.raw == second.raw
+    assert json.loads((tmp_path / "findings.json").read_text(encoding="utf-8")) == data
+
+
+def test_composer_defensively_denies_unconfirmed_fence():
+    member = located(location_status="unconfirmed")
+    assert "```suggestion" not in compose.render_comment_body(member)
+    section = compose.build_skipped_section(
+        [compose.SkippedEntry("foo.py", 999, member)]
+    )
+    assert "foo.py (location unconfirmed)" in section and "999" not in section
+    member["location_status"] = "confirmed"
+    section = compose.build_skipped_section(
+        [compose.SkippedEntry("foo.py", 999, member)]
+    )
+    assert "foo.py:2" in section and "999" not in section
+
+
+GH_ARGS = (
+    "--owner",
+    "o",
+    "--repo",
+    "r",
+    "--pr-number",
+    "5",
+    "--platform",
+    "github",
+    "--sha",
+    SHA,
+)
+EMPTY_SUMMARY = HEADER + "Summary" + FOOTER.replace("{count}", "0")
+CONTEXT_BODY = "**\U0001f7e0 [HIGH] Context-line finding**\n\nBody one\n\n\u2694\ufe0f *Code Gauntlet*"
+
+SHA_CASES = [
+    ("  abc1234  ", "unused", 0, "abc1234", 0),
+    (None, " abc1234\n", 0, "abc1234", 1),
+    (None, "", 1, "unknown", 1),
+]
+
+
+@pytest.mark.parametrize("sha,head,status,expected,calls", SHA_CASES)
+def test_marker_sha(sha, head, status, expected, calls, posting):
+    for platform in ("github", "gitlab"):
+        findings = [CONTEXT] if platform == "gitlab" and status else []
+        run = posting(
+            review(platform, findings, sha=sha),
+            head=head,
+            head_status=status,
+            diff=CONTRACT_DIFF,
+            dry_run=False,
+        )
+        assert (run.code, run.err) == (0, UNKNOWN_WARNING if status else "")
+        assert len(run.head_calls) == calls
+        assert run.requests[0].payload["body"] == EMPTY_SUMMARY.replace(
+            SHA, expected
+        ).replace(
+            '"findings_count":0',
+            '"findings_count":1' if findings else '"findings_count":0',
+        )
+        if findings:
+            assert run.requests[1].payload["body"] == CONTEXT_BODY
+
+
+MARKER = [
+    pytest.param(
+        "leading-separator", id="MARKER-leading-unicode-separator-does-not-dedup"
+    ),
+    pytest.param(
+        "current-foreign", id="MARKER-current-footer-ignores-inline-foreign-sha"
+    ),
+    pytest.param("stale-footer", id="MARKER-stale-footer-real-sha-last"),
+    pytest.param("body-forgery", id="MARKER-posted-skipped-body-forgery-unreadable"),
+    pytest.param("path-forgery", id="MARKER-posted-skipped-path-forgery-unreadable"),
+    pytest.param(
+        "footer-forgery", id="MARKER-posted-skipped-footer-forgery-unreadable"
+    ),
+]
+
+
+@pytest.mark.parametrize("kind", MARKER)
+def test_marker_delivery(kind, posting):
+    footer_line = "Generated by code-gauntlet | Reviewed up to: " + SHA
+    machine = (
+        '<!-- code-gauntlet-findings: {"version":"3.0","findings_count":0,"sha":"'
+        + SHA
+        + '"} -->'
+    )
+    if kind.endswith("-forgery"):
+        forged = (
+            '<!-- code-gauntlet-finding-key: {"sha":"'
+            + SHA
+            + '","key":"deadbeefcafebabe"} -->'
+        )
+        hostile = {
+            "admission": admitted_stamp(),
+            "disposition": "deliver",
+            "file": "src/edited.py",
+            "line": 999,
+            "severity": "high",
+            "title": "Off-diff bug",
+            "body": forged,
+        }
+        if kind == "path-forgery":
+            hostile.update(file=forged, body="Body B")
+        if kind == "footer-forgery":
+            hostile["body"] = (
+                "---\n"
+                + footer_line
+                + (
+                    "\n\n<!-- code-gauntlet-findings: "
+                    '{"version":"3.0","findings_count":999,"sha":"'
+                )
+                + SHA
+                + '"} -->'
+            )
+        run = posting(
+            review("gitlab", [CONTEXT, hostile]), diff=CONTRACT_DIFF, dry_run=False
+        )
+        assert run.code == 0
+        assert tuple(
+            request.endpoint.rsplit("/", 1)[-1] for request in run.requests
+        ) == ("notes", "discussions")
+        body = run.requests[0].payload["body"]
+        assert find_finding_markers(body) == []
+        assert "<!-- code-gauntlet-finding-key:" not in body
+        assert find_marker(body) == {
+            "version": "3.0",
+            "findings_count": 2,
+            "sha": SHA,
+            "_token": "code-gauntlet-findings",
+            "_legacy": False,
+        }
+        assert body.endswith(FOOTER.replace("{count}", "2"))
+        assert body.count(footer_line) == (2 if kind == "footer-forgery" else 1)
+        assert "Off-diff bug" in body
+        return
+    for platform in ("github", "gitlab"):
+        if kind == "leading-separator":
+            sources = ("\u2028" + footer_line,)
+        elif kind == "current-foreign":
+            sources = (
+                "Summary\n\n"
+                + footer_line
+                + (
+                    "\n\n- `foo.py:99`: x Generated by code-gauntlet | "
+                    "Reviewed up to: "
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ),
+            )
+        elif kind == "stale-footer":
+            sources = (
+                "Some notes.\n\nGenerated by code-gauntlet | Reviewed up to: abc1234",
+            )
+        for source in sources:
+            run = posting(review(platform, review_body=source))
+            assert run.code == 0
+            assert run.err == ""
+            body = run.payload["payload" if platform == "github" else "summary"]["body"]
+            if kind == "current-foreign":
+                assert body == HEADER + source + "\n\n" + machine
+                assert sum(line == footer_line for line in body.split("\n")) == 1
+            else:
+                assert body == HEADER + source + FOOTER.replace("{count}", "0")
+                assert sum(line == footer_line for line in body.split("\n")) == 1
+            signal = find_marker(body)
+            assert signal["sha"] == SHA
+            assert signal["findings_count"] == 0
+
+
+INPUT_REFUSALS = [
+    (review(web_origin=None), "web_origin must be a string"),
+    (
+        review(web_origin="https://git.example.com/path"),
+        "web_origin: web_origin must be an http(s) origin without a path, query or fragment",
+    ),
+    (7, "Findings JSON must be an object or an array."),
+    ({"repo": "r"}, "Missing required field in findings JSON: 'owner'"),
+    (review(owner=7), "owner must be a string"),
+    (
+        review(platform="BitBucket"),
+        "Unsupported platform: 'bitbucket'. Use 'github' or 'gitlab'.",
+    ),
+    ({**review(), "findings": None}, "findings must be an array"),
+    (review(findings=[None]), "findings[0] must be an object"),
+    *[
+        (
+            review(findings=[located(delivery_group=stamp)]),
+            "findings[0].delivery_group is malformed",
+        )
+        for stamp in (
+            "forged",
+            {},
+            {"issue_key": "i", "lead_id": "F1", "finding_ids": ["F1"], "extra": 1},
+            {"issue_key": "", "lead_id": "F1", "finding_ids": ["F1"]},
+            {"issue_key": "i", "lead_id": 1, "finding_ids": ["F1"]},
+            {"issue_key": "i", "lead_id": "F1", "finding_ids": "F1"},
+            {"issue_key": "i", "lead_id": "F1", "finding_ids": ["F1", 1]},
+            {"issue_key": "i", "lead_id": "F1", "finding_ids": ["F1", "F1"]},
+            {"issue_key": "i", "lead_id": "OTHER", "finding_ids": ["OTHER"]},
+            {"issue_key": "i", "lead_id": "OTHER", "finding_ids": ["F1"]},
+        )
+    ],
+]
+
+
+@pytest.mark.parametrize("data,error", INPUT_REFUSALS)
+def test_invalid_input_preserves_existing_artifact(
+    data, error, tmp_path, monkeypatch, capsys, forge_factory
+):
+    artifact = tmp_path / "post-review-payload.json"
+    artifact.write_bytes(b"sentinel artifact\n")
+    run = invoke_posting(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        forge_factory,
+        data,
+        dry_run=False,
+        keep_existing_artifact=True,
+    )
+    assert (run.code, run.out, run.err) == (1, "", "post_review: " + error + "\n")
+    assert run.forge_factory_calls == run.head_calls == run.requests == ()
+    assert run.raw == b"sentinel artifact\n"
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_review_input_defaults_and_unknown_fields(platform, posting):
+    data = review(platform)
+    del data["findings"]
+    run = posting(data)
+    assert (run.code, run.err) == (0, "")
+    assert (
+        run.payload["payload" if platform == "github" else "summary"]["body"]
+        == EMPTY_SUMMARY
+    )
+    data = review(platform, [located(future={"nested": [1]})], future_wrapper=7)
+    run = posting(data, diff=DIFF)
+    assert (run.code, run.err) == (0, "")
+    comments = (
+        run.payload["payload"]["comments"]
+        if platform == "github"
+        else run.payload["discussions"]
+    )
+    assert "Range bug" in comments[0]["body"]
+    assert "Return the current value." in comments[0]["body"]
+    for metadata in [
+        {"dimension": "test_coverage"},
+        {"dimension": "simplification"},
+        {"dimension": "type_design"},
+        {"dimension": "bug", "test_kind": "production_defect"},
+        {"dimension": "unknown", "agent": "test-analyzer"},
+        {
+            "dimension": "bug",
+            "origin_dimension": "test_coverage",
+            "test_kind": "production_defect",
+            "effective_test_kind": "defective_test",
+        },
+    ]:
+        legacy = located(**metadata)
+        del legacy["disposition"]
+        run = posting(review(platform, [legacy]), diff=DIFF)
+        assert (run.code, run.err) == (0, "")
+        comments = (
+            run.payload["payload"]["comments"]
+            if platform == "github"
+            else run.payload["discussions"]
+        )
+        assert comments == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        review(owner="other", repo="other", pr_number=9, sha="bbbbbbb", review_body=""),
+    ],
+)
+def test_review_input_overrides_and_report(data, posting, tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text(
+        "# Review\n\n## Summary\n\nFrom report\n\n## Findings\n", encoding="utf-8"
+    )
+    run = posting(
+        data,
+        arguments=(*GH_ARGS, "--report", str(report)),
+    )
+    assert (run.code, run.err, run.head_calls) == (0, "", ())
+    assert run.payload["endpoint"] == "repos/o/r/pulls/5/reviews"
+    assert run.payload["payload"]["body"] == HEADER + "From report" + FOOTER.replace(
+        "{count}", "0"
+    )
+    existing = posting(review(), arguments=("--report", "missing-report.md"))
+    assert (existing.code, existing.err) == (0, "")
+    assert existing.payload["payload"]["body"] == EMPTY_SUMMARY
+
+
+def test_detected_platform(posting, monkeypatch):
+    monkeypatch.setattr(
+        post, "origin_remote", lambda: parse_remote("git@github.com:o/r")
+    )
+    data = review()
+    del data["platform"]
+    run = posting(data)
+    assert (run.code, run.err) == (0, "")
+    assert run.out.startswith("Detected platform: github (from git remote: github.com)")
+    assert run.payload["platform"] == "github"
+
+
+def test_gitlab_identity_failure_warns_and_posts(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from gauntlet.forge import Poster
+
+    from tests.support.forge import FakeGitLab
+
+    failure = (
+        "could not resolve posting identity: /user denied; set CODE_GAUNTLET_POSTER"
+    )
+    fake = FakeGitLab(
+        entries=[JsonFetch([], "gitlab notes denied")],
+        posters=[Poster(None, failure)],
+    )
+    state = post.gitlab_prior_delivery(
+        "o", "r", 5, SHA, forge=fake, session=post.DeliverySession(dry_run=False)
+    )
+    assert state.error is not None and failure in state.error
+    assert not state.summary_posted
+    assert failure in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "origin, arguments, host",
+    [
+        (None, (), None),
+        ("https://Git.Example.COM:8443/", (), "git.example.com"),
+        (
+            "invalid",
+            ("--web-origin", "http://Override.Example:8080"),
+            "override.example",
+        ),
+    ],
+)
+def test_posting_origin(origin, arguments, host, posting):
+    data = review()
+    if origin is not None:
+        data["web_origin"] = origin
+    run = posting(data, arguments=arguments)
+    assert (run.code, run.err) == (0, "")
+    assert run.forge_factory_calls == (("github", host),)
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_position_delivery(platform, posting):
+    patch = (
+        "diff --git a/old_name.py b/new_name.py\nrename from old_name.py\nrename to new_name.py\n"
+        "--- a/old_name.py\n+++ b/new_name.py\n@@ -1,3 +1,3 @@\n def f():\n"
+        "-    previous_value = compute_value()\n+    original_value = compute_value()\n"
+        "     return original_value\n"
+    )
+    _, comments = surfaces(
+        posting(review(platform, [located(file="new_name.py")]), diff=patch)
+    )
+    comment = comments[0]
+    if platform == "github":
+        assert comment["path"] == "new_name.py" and comment["line"] == 3
+    else:
+        assert comment["position"]["new_path"] == "new_name.py"
+        assert comment["position"]["old_path"] == "old_name.py"
+        assert "old_line" not in comment["position"]
+
+
+def test_capture_bare_array_and_wrapper_bytes(posting):
+    member = located()
+    bare = posting([member], arguments=GH_ARGS, diff=DIFF)
+    wrapped = posting(review(findings=[member], review_body=""), diff=DIFF)
+    assert bare.code == wrapped.code == 0
+    assert bare.raw == wrapped.raw
+    assert len(bare.payload["payload"]["comments"]) == 1
+
+
+def test_string_pr_number_and_explicit_group_primary(posting):
+    members = [
+        located(consolidation_key="g"),
+        located(
+            id="F2",
+            title="Primary",
+            consolidation_key="g",
+            consolidation_primary=True,
+            line_start=4,
+            line_end=4,
+            anchor="finish_operation()",
+        ),
+    ]
+    run = posting(review(pr_number="5", findings=members), diff=DIFF)
+    _, comments = surfaces(run)
+    assert run.payload["endpoint"] == "repos/o/r/pulls/5/reviews"
+    assert len(comments) == 1 and comments[0]["line"] == 4
+    assert comments[0]["body"].startswith("**\U0001f7e0 [HIGH] Primary**")
+    assert "Range bug" in comments[0]["body"]
+
+
+def test_capture_gl_multibyte_boundary(posting, monkeypatch):
+    monkeypatch.setitem(
+        fold.PLATFORM_BODY_LIMITS["gitlab"]["surfaces"]["discussion"], "bytes", 500
+    )
+    member = located(body="\u754c" * 700)
+    dry = posting(review("gitlab", [member]), diff=DIFF)
+    _, comments = surfaces(dry)
+    live = posting(review("gitlab", [member]), diff=DIFF, dry_run=False)
+    assert live.code == 0
+    discussion = next(r for r in live.requests if r.endpoint.endswith("/discussions"))
+    body = discussion.payload["body"]
+    assert len(body.encode("utf-8")) <= 500
+    markers = find_finding_markers(body)
+    assert len(markers) == 1
+    suffix = post._delivery_marker_suffix(SHA, [markers[0]["key"]])
+    assert body.removesuffix(suffix) == comments[0]["body"]
+    assert "[folded:" in body

@@ -1,0 +1,2084 @@
+"""Tests for bench/runner/invoke.py + bench/runner/costs.py.
+
+No network: ``claude`` is replaced by bench/tests/fakes/fake_claude.py, copied onto a
+temp bin dir and put on PATH. invoke_review reads its base env from ``os.environ``, so
+the tests patch os.environ (restored via a contextmanager) to inject PATH + the
+FAKE_CLAUDE_* selectors, then let the fake propagate through build_env.
+"""
+
+import contextlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from typing import ClassVar
+from unittest.mock import patch
+
+from bench.runner import invoke
+from bench.runner.costs import parse_costs
+from bench.runner.invoke import InvokeResult, build_env, invoke_review
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+FAKE = Path(__file__).resolve().parent / "fakes" / "fake_claude.py"
+BUNDLE_BYTES = (REPO_ROOT / "workflows" / "pipeline.js").read_bytes()
+BUNDLE_TEXT = BUNDLE_BYTES.decode("utf-8")
+DIFFERENT_BUNDLE_TEXT = ("x" if BUNDLE_TEXT[0] != "x" else "y") + BUNDLE_TEXT[1:]
+# Hand-typed oracle for the parser, independent of the implementation constant.
+EXPECTED_PIPELINE_META_NAME = "code-gauntlet-pipeline"
+
+HAND_TYPED_BENCH_ENV = {
+    "CODE_GAUNTLET_HEADLESS": "1",
+    "CODE_GAUNTLET_MODEL_TIER": "optimized",
+    "CODE_GAUNTLET_DELIVERY": "pr_comments,markdown",
+    "CODE_GAUNTLET_POST_MODE": "dry-run",
+    "CODE_GAUNTLET_PR_COMMENT_CAP": "25",
+    "CODE_GAUNTLET_DELIVERY_TIER": "all",
+    "CODE_GAUNTLET_DRAFT_POLICY": "review",
+    "CODE_GAUNTLET_REVIEWED_POLICY": "full",
+    "CODE_GAUNTLET_PR_NOT_FOUND_POLICY": "error",
+    "CODE_GAUNTLET_TRIVIAL_SCOPE": "full",
+}
+HAND_TYPED_ECHO_RECEIPT = {
+    "model_tier": {"value": "optimized", "source": "env"},
+    "delivery": {"value": "pr_comments,markdown", "source": "env"},
+    "post_mode": {"value": "dry-run", "source": "env"},
+    "pr_comment_cap": {"value": "25", "source": "env"},
+    "delivery_tier": {"value": "all", "source": "env"},
+    "draft_policy": {"value": "review", "source": "env"},
+    "reviewed_policy": {"value": "full", "source": "env"},
+    "pr_not_found_policy": {"value": "error", "source": "env"},
+    "trivial_scope": {"value": "full", "source": "env"},
+}
+
+PR = {
+    "owner": "octo",
+    "repo": "widget",
+    "pr_number": 5,
+    "url": "https://github.com/octo/widget/pull/5",
+}
+
+
+@contextlib.contextmanager
+def patched_environ(**overrides):
+    saved = dict(os.environ)
+    os.environ.update({k: str(v) for k, v in overrides.items()})
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+class InvokeTestBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bench-invoke-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # run_dir shaped as <workspace>/runs/<run_id> so claude-home derives to
+        # <workspace>/claude-home under tmp (never the real ~/.claude).
+        self.run_dir = Path(self.tmp) / "workspace" / "runs" / "gate-test"
+        self.run_dir.mkdir(parents=True)
+        self.worktree = Path(self.tmp) / "wt"
+        self.worktree.mkdir()
+
+    def install_fake(self):
+        bindir = Path(self.tmp) / "bin"
+        bindir.mkdir(exist_ok=True)
+        dst = bindir / "claude"
+        shutil.copy(str(FAKE), str(dst))
+        dst.chmod(dst.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return bindir
+
+    def _run(
+        self,
+        mode,
+        timeout_s=30,
+        extra_env=None,
+        tool="deep-review-v3",
+        child_model="inherit",
+        child_auth="api",
+    ):
+        bindir = self.install_fake()
+        overrides = {
+            "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+            "PYTHONPATH": str(REPO_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+            "FAKE_CLAUDE_MODE": mode,
+        }
+        if extra_env:
+            overrides.update(extra_env)
+        with patched_environ(**overrides):
+            return invoke_review(
+                self.worktree,
+                PR,
+                self.run_dir,
+                timeout_s=timeout_s,
+                tool=tool,
+                child_model=child_model,
+                child_auth=child_auth,
+            )
+
+
+# ------------------------------------------------------------------------ pr_dir_name
+
+
+class PrDirNameTest(unittest.TestCase):
+    def test_owner_repo_number_key(self):
+        pr = {
+            "owner": "octo",
+            "repo": "widget",
+            "pr_number": 5,
+            "url": "https://github.com/octo/widget/pull/5",
+        }
+        self.assertEqual(invoke.pr_dir_name(pr), "pr-octo-widget-5")
+
+    def test_derives_from_url_when_owner_repo_absent(self):
+        pr = {"url": "https://github.com/acme/thing/pull/9"}
+        self.assertEqual(invoke.pr_dir_name(pr), "pr-acme-thing-9")
+
+    def test_same_number_different_repo_yields_distinct_keys(self):
+        # The collision FIX 1 targets: /pull/1 in two forks must not share a dir.
+        a = {
+            "url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1"
+        }
+        b = {
+            "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1"
+        }
+        self.assertNotEqual(invoke.pr_dir_name(a), invoke.pr_dir_name(b))
+        self.assertEqual(
+            invoke.pr_dir_name(a), "pr-ai-code-review-evaluation-sentry-greptile-1"
+        )
+
+    def test_unsafe_chars_collapsed(self):
+        pr = {"owner": "o/w", "repo": "a b", "pr_number": 3}
+        self.assertEqual(invoke.pr_dir_name(pr), "pr-o-w-a-b-3")
+
+
+# --------------------------------------------------------------------------- build_env
+
+
+def test_build_env_strips_model_mappings_in_both_auth_modes(tmp_path, monkeypatch):
+    monkeypatch.setattr(invoke, "_load_dotenv_key", lambda path, key: None)
+    aliases = ("SONNET", "OPUS", "HAIKU", "FABLE")
+    ambient = {f"ANTHROPIC_DEFAULT_{alias}_MODEL": "unexpected" for alias in aliases}
+    ambient.update(CLAUDE_CODE_OAUTH_TOKEN="example-token", KEEP="preserved")
+    for auth_mode in ("api", "subscription"):
+        env = build_env(PR, tmp_path / auth_mode, ambient, child_auth=auth_mode)
+        assert all(f"ANTHROPIC_DEFAULT_{alias}_MODEL" not in env for alias in aliases)
+        assert env["KEEP"] == "preserved"
+    assert all(f"ANTHROPIC_DEFAULT_{alias}_MODEL" in ambient for alias in aliases)
+
+
+class BuildEnvTest(InvokeTestBase):
+    def test_sets_ten_bench_values(self):
+        env = build_env(PR, self.run_dir, {})
+        self.assertEqual(
+            {key: env[key] for key in HAND_TYPED_BENCH_ENV}, HAND_TYPED_BENCH_ENV
+        )
+
+    def test_scrubs_all_ambient_bench_prefixes_before_overlay(self):
+        ambient = {
+            "CODE_GAUNTLET_TASKS_DIR": "/junk/tasks",
+            "CODE_GAUNTLET_BIOME_CACHE": "/junk/biome",
+            "CODE_GAUNTLET_FUTURE_SENTINEL": "x",
+            "CODE_GAUNTLET_HEADLESS": "0",
+            "CODE_GAUNTLET_MODEL_TIER": "optimized",
+            "CODE_GAUNTLET_DELIVERY": "chat",
+            "CODE_GAUNTLET_POST_MODE": "live",
+            "CODE_GAUNTLET_PR_COMMENT_CAP": "1",
+            "CODE_GAUNTLET_DELIVERY_TIER": "main_only",
+            "CODE_GAUNTLET_DRAFT_POLICY": "skip",
+            "CODE_GAUNTLET_REVIEWED_POLICY": "skip",
+            "CODE_GAUNTLET_PR_NOT_FOUND_POLICY": "local",
+            "CODE_GAUNTLET_TRIVIAL_SCOPE": "light",
+            "OTHER": "preserved",
+        }
+        env = build_env(PR, self.run_dir, ambient)
+        self.assertEqual(
+            {key for key in env if key.startswith("CODE_GAUNTLET_")},
+            set(invoke.BENCH_ENV) | {"CODE_GAUNTLET_OUTPUT_DIR"},
+        )
+        self.assertEqual(env["CODE_GAUNTLET_HEADLESS"], "1")
+        self.assertEqual(env["OTHER"], "preserved")
+
+    def test_scrub_ambient_returns_clean_copy_and_sorted_removed_names(self):
+        clean, removed = invoke.scrub_ambient(
+            {
+                "CODE_GAUNTLET_Z": "z",
+                "KEEP": "yes",
+                "CODE_GAUNTLET_A": "a",
+            }
+        )
+        self.assertEqual(clean, {"KEEP": "yes"})
+        self.assertEqual(removed, ["CODE_GAUNTLET_A", "CODE_GAUNTLET_Z"])
+
+    def test_real_resolver_subprocess_receives_the_built_env(self):
+        ambient = dict(os.environ)
+        ambient.update(
+            {
+                "CODE_GAUNTLET_TASKS_DIR": "/junk/tasks",
+                "CODE_GAUNTLET_BIOME_CACHE": "/junk/biome",
+                "CODE_GAUNTLET_HEADLESS": "0",
+                "CODE_GAUNTLET_MODEL_TIER": "optimized",
+                "CODE_GAUNTLET_DELIVERY": "chat",
+                "CODE_GAUNTLET_POST_MODE": "live",
+                "CODE_GAUNTLET_PR_COMMENT_CAP": "1",
+                "CODE_GAUNTLET_DELIVERY_TIER": "main_only",
+                "CODE_GAUNTLET_DRAFT_POLICY": "skip",
+                "CODE_GAUNTLET_REVIEWED_POLICY": "skip",
+                "CODE_GAUNTLET_PR_NOT_FOUND_POLICY": "local",
+                "CODE_GAUNTLET_TRIVIAL_SCOPE": "light",
+            }
+        )
+        built = build_env(PR, self.run_dir, ambient)
+        result = subprocess.run(
+            ["python3", "scripts/resolve_config.py", "--target", "pr"],
+            cwd=REPO_ROOT,
+            env=built,
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)["waist"]["configEcho"]
+        self.assertEqual(receipt, HAND_TYPED_ECHO_RECEIPT)
+        self.assertNotIn("CODE_GAUNTLET_TASKS_DIR", built)
+        self.assertNotIn("CODE_GAUNTLET_BIOME_CACHE", built)
+
+    def test_build_bench_env_rejects_missing_and_extra_pin_keys(self):
+        registry = [
+            {
+                "key": "example",
+                "modes": ["headless"],
+                "env": "CODE_GAUNTLET_EXAMPLE",
+                "rule": {"kind": "enum", "values": ["ok"]},
+            }
+        ]
+        # Each arm names its own guard message: a deleted key-set guard would fall through
+        # to a KeyError on the missing pin, which the missing-arm regex must not accept.
+        with self.assertRaisesRegex(
+            ValueError, r"BENCH_PINS key set mismatch: missing key\(s\) 'example'$"
+        ):
+            invoke.build_bench_env({}, registry)
+        with self.assertRaisesRegex(
+            ValueError, r"BENCH_PINS key set mismatch: unexpected key\(s\) 'extra'$"
+        ):
+            invoke.build_bench_env(
+                {"example": "ok", "extra": "ok"},
+                registry,
+            )
+
+    def test_build_bench_env_rejects_invalid_pin_value(self):
+        registry = [
+            {
+                "key": "example",
+                "modes": ["headless"],
+                "env": "CODE_GAUNTLET_EXAMPLE",
+                "rule": {"kind": "enum", "values": ["ok"]},
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, r"BENCH_PINS\['example'\]"):
+            invoke.build_bench_env({"example": "bad"}, registry)
+
+    def test_expected_echo_is_the_resolver_receipt_and_bench_pin_oracle(self):
+        self.assertEqual(invoke.EXPECTED_ECHO_RECEIPT, HAND_TYPED_ECHO_RECEIPT)
+        self.assertEqual(
+            invoke.EXPECTED_ECHO,
+            {key: entry["value"] for key, entry in HAND_TYPED_ECHO_RECEIPT.items()},
+        )
+        headless_rows = [
+            row
+            for row in invoke.KNOB_REGISTRY
+            if "headless" in row["modes"] and row.get("env")
+        ]
+        self.assertEqual(
+            {row["env"]: invoke.BENCH_ENV[row["env"]] for row in headless_rows},
+            {
+                key: value
+                for key, value in HAND_TYPED_BENCH_ENV.items()
+                if key != "CODE_GAUNTLET_HEADLESS"
+            },
+        )
+        self.assertEqual(
+            {row["key"]: invoke.BENCH_ENV[row["env"]] for row in headless_rows},
+            invoke.EXPECTED_ECHO,
+        )
+        self.assertEqual(
+            {row["key"] for row in headless_rows}, set(HAND_TYPED_ECHO_RECEIPT)
+        )
+        self.assertTrue(
+            all(
+                entry["source"] == "env"
+                for entry in invoke.EXPECTED_ECHO_RECEIPT.values()
+            )
+        )
+
+    def test_output_dir_and_gh_repo(self):
+        env = build_env(PR, self.run_dir, {})
+        self.assertEqual(env["CODE_GAUNTLET_OUTPUT_DIR"], str(self.run_dir / "output"))
+        self.assertEqual(env["GH_REPO"], "octo/widget")
+
+    def test_gh_repo_from_url_fallback(self):
+        pr = {"url": "https://github.com/acme/thing/pull/9", "pr_number": 9}
+        env = build_env(pr, self.run_dir, {})
+        self.assertEqual(env["GH_REPO"], "acme/thing")
+
+    def test_uncaps_background_wait_ceiling(self):
+        # The child must carry CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0" so the CLI does not
+        # terminate a still-running Phase 3 Workflow at its default 600s background-wait cap
+        # (which sank smoke-20260719-190902-a14b4cc). The per-PR watchdog bounds total time.
+        env = build_env(PR, self.run_dir, {})
+        self.assertEqual(env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"], "0")
+
+    def test_home_and_config_dir_isolated(self):
+        env = build_env(PR, self.run_dir, {})
+        workspace = self.run_dir.resolve().parent.parent
+        self.assertEqual(env["HOME"], str(workspace / "claude-home"))
+        self.assertEqual(
+            env["CLAUDE_CONFIG_DIR"], str(workspace / "claude-home" / "config")
+        )
+
+    def test_base_env_preserved(self):
+        env = build_env(PR, self.run_dir, {"PATH": "/x/y", "FOO": "bar"})
+        self.assertEqual(env["PATH"], "/x/y")
+        self.assertEqual(env["FOO"], "bar")
+
+    def test_seeds_claude_json_trust(self):
+        env = build_env(PR, self.run_dir, {})
+        cfg = Path(env["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+        self.assertTrue(cfg.exists())
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        wt = str((self.run_dir / invoke.pr_dir_name(PR) / "worktree").resolve())
+        self.assertIn(wt, data["projects"])
+        self.assertTrue(data["projects"][wt]["hasTrustDialogAccepted"])
+
+    def test_seeds_claude_json_merges_existing(self):
+        # Pre-seed a config with an unrelated project and a top-level key.
+        workspace = self.run_dir.resolve().parent.parent
+        cfg_dir = workspace / "claude-home" / "config"
+        cfg_dir.mkdir(parents=True)
+        existing = {
+            "numStartups": 4,
+            "projects": {"/some/other/repo": {"hasTrustDialogAccepted": True}},
+        }
+        (cfg_dir / ".claude.json").write_text(json.dumps(existing), encoding="utf-8")
+
+        build_env(PR, self.run_dir, {})
+        data = json.loads((cfg_dir / ".claude.json").read_text(encoding="utf-8"))
+        # existing content preserved
+        self.assertEqual(data["numStartups"], 4)
+        self.assertIn("/some/other/repo", data["projects"])
+        # new worktree merged in
+        wt = str((self.run_dir / invoke.pr_dir_name(PR) / "worktree").resolve())
+        self.assertTrue(data["projects"][wt]["hasTrustDialogAccepted"])
+
+
+# --------------------------------------------------------------- build_env gh auth
+
+
+class BuildEnvGhAuthTest(InvokeTestBase):
+    """build_env must keep child ``gh`` authenticated across the HOME override.
+
+    The claude-config isolation overrides HOME/CLAUDE_CONFIG_DIR (the S7 boundary is
+    the claude binary's settings/plugins). The skill's children still shell out to
+    ``gh pr view/diff``, whose auth lives under the REAL home -- so build_env points
+    GH_CONFIG_DIR back at the real gh config dir and passes GH_TOKEN/GITHUB_TOKEN
+    through. This does NOT weaken the isolation: gh auth is an ambient prerequisite,
+    not part of the claude-settings boundary.
+    """
+
+    def test_gh_config_dir_derived_from_base_home_when_dir_exists(self):
+        home = Path(self.tmp) / "realhome"
+        gh_dir = home / ".config" / "gh"
+        gh_dir.mkdir(parents=True)
+        env = build_env(PR, self.run_dir, {"HOME": str(home)})
+        self.assertEqual(env["GH_CONFIG_DIR"], str(gh_dir))
+        # HOME itself is still overridden to the isolated claude-home.
+        self.assertNotEqual(env["HOME"], str(home))
+
+    def test_gh_config_dir_honors_xdg_config_home(self):
+        xdg = Path(self.tmp) / "xdg"
+        gh_dir = xdg / "gh"
+        gh_dir.mkdir(parents=True)
+        home = Path(self.tmp) / "realhome"
+        (home / ".config" / "gh").mkdir(parents=True)  # must lose to XDG_CONFIG_HOME
+        env = build_env(
+            PR, self.run_dir, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+        )
+        self.assertEqual(env["GH_CONFIG_DIR"], str(gh_dir))
+
+    def test_gh_config_dir_not_set_when_dir_absent(self):
+        home = Path(self.tmp) / "realhome-empty"
+        home.mkdir()  # no .config/gh underneath
+        env = build_env(PR, self.run_dir, {"HOME": str(home)})
+        self.assertNotIn("GH_CONFIG_DIR", env)
+
+    def test_explicit_base_gh_config_dir_preserved(self):
+        # An operator-set GH_CONFIG_DIR wins and passes through unchanged, even when it
+        # does not exist on disk (the caller vouches for it -- no derivation, no check).
+        env = build_env(
+            PR, self.run_dir, {"HOME": str(self.tmp), "GH_CONFIG_DIR": "/custom/gh"}
+        )
+        self.assertEqual(env["GH_CONFIG_DIR"], "/custom/gh")
+
+    def test_gh_and_github_tokens_passed_through(self):
+        env = build_env(PR, self.run_dir, {"GH_TOKEN": "ght", "GITHUB_TOKEN": "ghb"})
+        self.assertEqual(env["GH_TOKEN"], "ght")
+        self.assertEqual(env["GITHUB_TOKEN"], "ghb")
+
+
+# ------------------------------------------------------------------ build_env .env
+
+
+class BuildEnvDotenvTest(InvokeTestBase):
+    """build_env must load the metered ANTHROPIC_API_KEY from bench/.env.
+
+    The isolated HOME/CLAUDE_CONFIG_DIR carries no credentials and the ambient
+    env generally has no key, so every invocation would be unauthenticated
+    without this. The bench/.env value is authoritative: it wins over any
+    ambient ANTHROPIC_API_KEY so all bench spend lands on the single metered key.
+    """
+
+    def _use_env_file(self, text):
+        path = Path(self.tmp) / "bench.env"
+        path.write_text(text, encoding="utf-8")
+        saved = invoke.ENV_PATH
+        invoke.ENV_PATH = path
+        self.addCleanup(setattr, invoke, "ENV_PATH", saved)
+        return path
+
+    def _use_missing_env(self):
+        saved = invoke.ENV_PATH
+        invoke.ENV_PATH = Path(self.tmp) / "does-not-exist.env"
+        self.addCleanup(setattr, invoke, "ENV_PATH", saved)
+
+    def test_loads_api_key_from_dotenv(self):
+        self._use_env_file("# metered key\nANTHROPIC_API_KEY=sk-from-dotenv\n\n")
+        env = build_env(PR, self.run_dir, {})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-from-dotenv")
+
+    def test_dotenv_wins_over_ambient(self):
+        self._use_env_file("ANTHROPIC_API_KEY=sk-from-dotenv\n")
+        env = build_env(PR, self.run_dir, {"ANTHROPIC_API_KEY": "sk-ambient"})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-from-dotenv")
+
+    def test_absent_dotenv_leaves_ambient_untouched(self):
+        self._use_missing_env()
+        env = build_env(PR, self.run_dir, {"ANTHROPIC_API_KEY": "sk-ambient"})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ambient")
+
+    def test_empty_key_in_dotenv_leaves_ambient_untouched(self):
+        self._use_env_file("ANTHROPIC_API_KEY=\n")
+        env = build_env(PR, self.run_dir, {"ANTHROPIC_API_KEY": "sk-ambient"})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ambient")
+
+
+# ------------------------------------------------------------------ child auth mode
+
+
+class BuildEnvChildAuthTest(InvokeTestBase):
+    """build_env's ``child_auth`` mode is the single auth branch point for the child.
+
+    ``api`` (the default) must stay behaviourally identical to the pre-mode harness --
+    every recorded run and every paired leg of record depends on that. ``subscription``
+    must actually reach the subscription: the documented precedence chain puts cloud
+    providers, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and an apiKeyHelper all ABOVE
+    CLAUDE_CODE_OAUTH_TOKEN, and the child inherits the full parent env -- so any one of
+    them left in place silently bills the API key while the operator believes the run is
+    on subscription capacity. These tests pin the strip and the token precedence.
+    """
+
+    def _use_env_file(self, text):
+        path = Path(self.tmp) / "bench.env"
+        path.write_text(text, encoding="utf-8")
+        saved = invoke.ENV_PATH
+        invoke.ENV_PATH = path
+        self.addCleanup(setattr, invoke, "ENV_PATH", saved)
+        return path
+
+    def _use_missing_env(self):
+        saved = invoke.ENV_PATH
+        invoke.ENV_PATH = Path(self.tmp) / "does-not-exist.env"
+        self.addCleanup(setattr, invoke, "ENV_PATH", saved)
+
+    def test_mode_constants(self):
+        # The mode names are the ledger's vocabulary, imported rather than restated -- see
+        # test_ledger.py for the canonical definition and its drift guards.
+        self.assertEqual(invoke.AUTH_MODES, ("api", "subscription"))
+        self.assertEqual(invoke.OAUTH_TOKEN_VAR, "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertEqual(
+            invoke._OUTRANKING_CREDENTIAL_VARS,
+            (
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+            ),
+        )
+
+    def test_api_is_the_default_mode(self):
+        self._use_env_file("ANTHROPIC_API_KEY=sk-from-dotenv\n")
+        base = {"PATH": "/x/y", "HOME": str(self.tmp)}
+        self.assertEqual(
+            build_env(PR, self.run_dir, base),
+            build_env(PR, self.run_dir, base, child_auth="api"),
+        )
+
+    def test_api_mode_keeps_ambient_oauth_token_and_injects_dotenv_key(self):
+        # api mode strips nothing: an operator with a subscription token exported for
+        # their own shell must still get exactly today's child env.
+        self._use_env_file("ANTHROPIC_API_KEY=sk-from-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oat-ambient"},
+            child_auth="api",
+        )
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "oat-ambient")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-from-dotenv")
+
+    def test_subscription_does_not_inject_dotenv_api_key(self):
+        self._use_env_file(
+            "ANTHROPIC_API_KEY=sk-from-dotenv\nCLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n"
+        )
+        env = build_env(PR, self.run_dir, {}, child_auth="subscription")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_subscription_strips_ambient_anthropic_api_key(self):
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"ANTHROPIC_API_KEY": "sk-ambient"},
+            child_auth="subscription",
+        )
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_subscription_strips_ambient_anthropic_auth_token(self):
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"ANTHROPIC_AUTH_TOKEN": "at-ambient"},
+            child_auth="subscription",
+        )
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+
+    def test_subscription_strips_bedrock_switch(self):
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"CLAUDE_CODE_USE_BEDROCK": "1"},
+            child_auth="subscription",
+        )
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+
+    def test_subscription_strips_vertex_switch(self):
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"CLAUDE_CODE_USE_VERTEX": "1"},
+            child_auth="subscription",
+        )
+        self.assertNotIn("CLAUDE_CODE_USE_VERTEX", env)
+
+    def test_subscription_token_from_dotenv(self):
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(PR, self.run_dir, {}, child_auth="subscription")
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "oat-dotenv")
+
+    def test_subscription_token_from_ambient_when_dotenv_has_none(self):
+        self._use_missing_env()
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oat-ambient"},
+            child_auth="subscription",
+        )
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "oat-ambient")
+
+    def test_subscription_dotenv_token_wins_over_ambient(self):
+        # One rule for bench/.env, mirroring ANTHROPIC_API_KEY: the file is authoritative.
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oat-ambient"},
+            child_auth="subscription",
+        )
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "oat-dotenv")
+
+    def test_subscription_without_any_token_raises(self):
+        self._use_missing_env()
+        with self.assertRaises(RuntimeError) as ctx:
+            build_env(PR, self.run_dir, {}, child_auth="subscription")
+        message = str(ctx.exception)
+        # The message spells the var name out literally (it reaches stderr and the
+        # checkpoint detail, and a credential-named identifier flowing into either is
+        # what a scanner reports as clear-text exposure), so assert against the constant
+        # the lookup uses -- that is what keeps the two spellings from drifting.
+        self.assertIn(invoke.OAUTH_TOKEN_VAR, message)
+        self.assertIn("claude setup-token", message)
+
+    def test_error_message_never_carries_a_credential(self):
+        # An unknown mode must not turn the base env into a leak channel.
+        self._use_env_file("ANTHROPIC_API_KEY=sk-from-dotenv\n")
+        with self.assertRaises(ValueError) as ctx:
+            build_env(
+                PR,
+                self.run_dir,
+                {"ANTHROPIC_API_KEY": "sk-ambient"},
+                child_auth="oauth",
+            )
+        message = str(ctx.exception)
+        self.assertIn("oauth", message)
+        self.assertIn("subscription", message)
+        self.assertNotIn("sk-ambient", message)
+        self.assertNotIn("sk-from-dotenv", message)
+
+    def test_unknown_mode_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            build_env(PR, self.run_dir, {}, child_auth="")
+
+    def test_subscription_keeps_the_isolated_home_and_gh_auth(self):
+        # The auth mode changes credentials only -- the S7 isolation and the gh
+        # re-pointing must be identical in both modes.
+        self._use_env_file("CLAUDE_CODE_OAUTH_TOKEN=oat-dotenv\n")
+        home = Path(self.tmp) / "realhome"
+        (home / ".config" / "gh").mkdir(parents=True)
+        env = build_env(
+            PR,
+            self.run_dir,
+            {"HOME": str(home), "GH_TOKEN": "ght"},
+            child_auth="subscription",
+        )
+        workspace = self.run_dir.resolve().parent.parent
+        self.assertEqual(env["HOME"], str(workspace / "claude-home"))
+        self.assertEqual(env["GH_CONFIG_DIR"], str(home / ".config" / "gh"))
+        self.assertEqual(env["GH_TOKEN"], "ght")
+
+
+# ------------------------------------------------------------------- claude home
+
+
+class ResolveClaudeHomeTest(InvokeTestBase):
+    """The isolated claude home has exactly one derivation.
+
+    ``check_prereqs`` must inspect the very dir ``build_env`` will hand the child --
+    an apiKeyHelper in a settings file the preflight never looked at would outrank the
+    OAuth token at runtime. So the public helper and ``_claude_home`` share one rule,
+    and ``_claude_home``'s existing behaviour is unchanged.
+    """
+
+    def test_workspace_relative_default(self):
+        workspace = Path(self.tmp) / "workspace"
+        self.assertEqual(
+            invoke.resolve_claude_home(workspace, {}), workspace / "claude-home"
+        )
+
+    def test_bench_claude_home_override_wins(self):
+        workspace = Path(self.tmp) / "workspace"
+        override = Path(self.tmp) / "elsewhere"
+        self.assertEqual(
+            invoke.resolve_claude_home(workspace, {"BENCH_CLAUDE_HOME": str(override)}),
+            override,
+        )
+
+    def test_claude_home_still_derives_from_run_dir(self):
+        workspace = self.run_dir.resolve().parent.parent
+        self.assertEqual(
+            invoke._claude_home(self.run_dir, {}), workspace / "claude-home"
+        )
+
+    def test_claude_home_still_honors_the_override(self):
+        override = Path(self.tmp) / "elsewhere"
+        self.assertEqual(
+            invoke._claude_home(self.run_dir, {"BENCH_CLAUDE_HOME": str(override)}),
+            override,
+        )
+
+
+class ApiKeyHelperSourcesTest(InvokeTestBase):
+    """An ``apiKeyHelper`` in the isolated config outranks CLAUDE_CODE_OAUTH_TOKEN.
+
+    Unlike an env var it cannot be stripped from the child env, so preflight has to
+    refuse the run instead. The inspection runs on every prereq check, including runs
+    with no claude home at all, so a missing dir, an unreadable file or corrupt JSON
+    must read as "no helper" rather than crashing the harness.
+    """
+
+    def _config_dir(self):
+        path = Path(self.tmp) / "home" / "config"
+        path.mkdir(parents=True)
+        return path
+
+    def test_missing_dir_is_empty(self):
+        self.assertEqual(
+            invoke.api_key_helper_files(Path(self.tmp) / "no-such-home"), []
+        )
+
+    def test_settings_without_the_key_is_empty(self):
+        cfg = self._config_dir()
+        (cfg / "settings.json").write_text(
+            json.dumps({"model": "opus"}), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [])
+
+    def test_empty_helper_value_is_empty(self):
+        cfg = self._config_dir()
+        (cfg / "settings.json").write_text(
+            json.dumps({"apiKeyHelper": "   "}), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [])
+
+    def test_corrupt_json_is_empty(self):
+        cfg = self._config_dir()
+        (cfg / "settings.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [])
+
+    def test_non_object_json_is_empty(self):
+        cfg = self._config_dir()
+        (cfg / "settings.json").write_text(
+            json.dumps(["apiKeyHelper"]), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [])
+
+    def test_unreadable_file_is_empty(self):
+        cfg = self._config_dir()
+        (
+            cfg / "settings.json"
+        ).mkdir()  # a dir where a file is expected: OSError on read
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [])
+
+    def test_finds_helper_in_settings_json(self):
+        cfg = self._config_dir()
+        path = cfg / "settings.json"
+        path.write_text(
+            json.dumps({"apiKeyHelper": "/bin/echo sk-x"}), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [str(path)])
+
+    def test_finds_helper_in_settings_local_json(self):
+        cfg = self._config_dir()
+        path = cfg / "settings.local.json"
+        path.write_text(
+            json.dumps({"apiKeyHelper": "/bin/echo sk-x"}), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(cfg.parent), [str(path)])
+
+    def test_both_files_reported_sorted(self):
+        cfg = self._config_dir()
+        (cfg / "settings.json").write_text(
+            json.dumps({"apiKeyHelper": "a"}), encoding="utf-8"
+        )
+        (cfg / "settings.local.json").write_text(
+            json.dumps({"apiKeyHelper": "b"}), encoding="utf-8"
+        )
+        self.assertEqual(
+            invoke.api_key_helper_files(cfg.parent),
+            sorted([str(cfg / "settings.json"), str(cfg / "settings.local.json")]),
+        )
+
+    def test_public_name_keeps_its_return_value_de_classified(self):
+        # check_prereqs prints this function's return value, to name the offending file. A
+        # static analyser's credential heuristic matches the "api?key" in the name and then
+        # reads what it returns as a printed credential -- unless the name also carries the
+        # heuristic's own de-classifier for a filename. Renaming away from files/paths
+        # brings back a false clear-text-logging alert on the prereq output.
+        self.assertRegex(invoke.api_key_helper_files.__name__, r"file|path")
+
+    def test_dot_claude_under_the_home_is_also_inspected(self):
+        # BENCH_CLAUDE_HOME can point at a home that is not bench-created, and the CLI
+        # reads user settings from the HOME-relative .claude dir when CLAUDE_CONFIG_DIR
+        # is not what it resolves. Scanning both is fail-closed: the only outcome is a
+        # refusal, and the bench-created home has neither file.
+        home = Path(self.tmp) / "home"
+        dot_claude = home / ".claude"
+        dot_claude.mkdir(parents=True)
+        path = dot_claude / "settings.json"
+        path.write_text(
+            json.dumps({"apiKeyHelper": "/bin/echo sk-x"}), encoding="utf-8"
+        )
+        self.assertEqual(invoke.api_key_helper_files(home), [str(path)])
+
+    def test_helpers_from_both_dirs_are_reported_together(self):
+        cfg = self._config_dir()
+        home = cfg.parent
+        (home / ".claude").mkdir()
+        config_path = cfg / "settings.json"
+        home_path = home / ".claude" / "settings.local.json"
+        config_path.write_text(json.dumps({"apiKeyHelper": "a"}), encoding="utf-8")
+        home_path.write_text(json.dumps({"apiKeyHelper": "b"}), encoding="utf-8")
+        self.assertEqual(
+            invoke.api_key_helper_files(home),
+            sorted([str(config_path), str(home_path)]),
+        )
+
+
+# --------------------------------------------------------------------------- costs
+
+
+class ParseCostsTest(unittest.TestCase):
+    def test_fixture_envelope(self):
+        envelope = {
+            "total_cost_usd": 2.5,
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 5,
+                "service_tier": "standard",  # non-token, ignored
+            },
+            "modelUsage": {
+                "claude-opus-4-8": {
+                    "inputTokens": 80,
+                    "outputTokens": 40,
+                    "cacheReadInputTokens": 10,
+                    "cacheCreationInputTokens": 5,
+                    "costUSD": 2.0,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 20,
+                    "outputTokens": 10,
+                    "costUSD": 0.5,
+                },
+            },
+        }
+        out = parse_costs(envelope)
+        self.assertEqual(out["cost_usd"], 2.5)
+        self.assertEqual(out["tokens_total"], 165)  # 100+50+10+5
+        self.assertEqual(out["per_model"]["claude-opus-4-8"]["tokens"], 135)
+        self.assertEqual(out["per_model"]["claude-opus-4-8"]["cost_usd"], 2.0)
+        self.assertEqual(out["per_model"]["claude-haiku-4-5"]["tokens"], 30)
+        self.assertEqual(out["per_model"]["claude-haiku-4-5"]["cost_usd"], 0.5)
+
+    def test_capacity_fields_are_not_usage(self):
+        # maxOutputTokens (and any max/limit-prefixed field) is a model property
+        # documented beside the real counters in modelUsage; it must not inflate
+        # the summed totals.
+        envelope = {
+            "total_cost_usd": 1.0,
+            "usage": {},
+            "modelUsage": {
+                "claude-opus-4-8[1m]": {
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "maxOutputTokens": 32000,
+                    "tokenLimit": 200000,
+                    "costUSD": 1.0,
+                }
+            },
+        }
+        out = parse_costs(envelope)
+        self.assertEqual(out["tokens_total"], 150)
+        self.assertEqual(out["per_model"]["claude-opus-4-8[1m]"]["tokens"], 150)
+
+    def test_multi_model_sums_all_with_variant_suffix(self):
+        # A run can report several models (a primary plus a background bookkeeping
+        # call); ids are opaque and may carry variant suffixes. Every key is summed
+        # and passed through -- no id is assumed or pattern-matched.
+        envelope = {
+            "total_cost_usd": 3.0,
+            "usage": {
+                "input_tokens": 300,
+                "output_tokens": 120,
+                "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 10,
+            },
+            "modelUsage": {
+                "claude-opus-4-8[1m]": {
+                    "inputTokens": 280,
+                    "outputTokens": 110,
+                    "cacheReadInputTokens": 20,
+                    "cacheCreationInputTokens": 10,
+                    "costUSD": 2.9,
+                },
+                "claude-haiku-4-5-20251001": {
+                    "inputTokens": 20,
+                    "outputTokens": 10,
+                    "costUSD": 0.1,
+                },
+            },
+        }
+        out = parse_costs(envelope)
+        self.assertEqual(out["cost_usd"], 3.0)
+        self.assertEqual(out["tokens_total"], 450)  # 300+120+20+10
+        self.assertEqual(
+            set(out["per_model"]),
+            {"claude-opus-4-8[1m]", "claude-haiku-4-5-20251001"},
+        )
+        self.assertEqual(out["per_model"]["claude-opus-4-8[1m]"]["tokens"], 420)
+        self.assertEqual(out["per_model"]["claude-opus-4-8[1m]"]["cost_usd"], 2.9)
+        self.assertEqual(out["per_model"]["claude-haiku-4-5-20251001"]["tokens"], 30)
+        self.assertEqual(out["per_model"]["claude-haiku-4-5-20251001"]["cost_usd"], 0.1)
+
+    def test_tokens_total_falls_back_to_modelusage_sum(self):
+        # No aggregate .usage present -> sum tokens across ALL modelUsage keys.
+        envelope = {
+            "modelUsage": {
+                "m-primary[1m]": {"inputTokens": 10, "outputTokens": 5},
+                "m-background": {"inputTokens": 3, "outputTokens": 2},
+            }
+        }
+        out = parse_costs(envelope)
+        self.assertEqual(out["tokens_total"], 20)  # (10+5) + (3+2)
+
+    def test_empty_envelope(self):
+        out = parse_costs({})
+        self.assertEqual(out["cost_usd"], 0.0)
+        self.assertEqual(out["tokens_total"], 0)
+        self.assertEqual(out["per_model"], {})
+
+    def test_nested_cache_not_double_counted(self):
+        # A nested cache_creation dict must not have its components summed on top of
+        # the flat cache_creation_input_tokens aggregate.
+        usage = {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cache_creation_input_tokens": 6,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 6,
+                "ephemeral_1h_input_tokens": 0,
+            },
+        }
+        out = parse_costs({"usage": usage})
+        self.assertEqual(out["tokens_total"], 20)  # 10+4+6, nested dict skipped
+
+
+# ------------------------------------------------------------------------- invoke
+
+
+class InvokeReviewTest(InvokeTestBase):
+    def test_ok(self):
+        res = self._run("ok")
+        self.assertIsInstance(res, InvokeResult)
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.cost_usd, 1.23)
+        self.assertTrue(res.echo_ok)
+        self.assertIsNotNone(res.payload_path)
+        self.assertTrue(Path(res.payload_path).exists())
+        self.assertTrue(Path(res.raw_json_path).exists())
+        self.assertIn("claude-opus-4-8", res.per_model)
+
+    def test_invokes_namespace_qualified_skill_command(self):
+        # Regression: the child must be invoked with the NAMESPACE-QUALIFIED slash command
+        # ``/code-gauntlet:code-gauntlet <n>``, not the flat ``/code-gauntlet <n>``. In the pinned
+        # isolated --plugin-dir context the flat alias is not reliably registered and
+        # resolves to "Unknown command" (num_turns 0), which sank real smoke runs pre-rename
+        # children. See invoke.SKILL_COMMAND and artifact 33 (P2b).
+        argv_file = Path(self.tmp) / "argv.txt"
+        res = self._run("ok", extra_env={"FAKE_CLAUDE_ARGV_FILE": str(argv_file)})
+        self.assertEqual(res.status, "ok")
+        self.assertTrue(argv_file.exists())
+        argv = argv_file.read_text(encoding="utf-8").splitlines()
+        self.assertIn("-p", argv)
+        prompt = argv[argv.index("-p") + 1]
+        self.assertEqual(
+            prompt,
+            "/code-gauntlet:code-gauntlet {}".format(PR["pr_number"]),
+        )
+        # Guard the exact regression: the bare/flat command must not reappear.
+        self.assertNotEqual(prompt, "/code-gauntlet {}".format(PR["pr_number"]))
+
+    def test_hang_times_out_and_kills_group(self):
+        pidfile = Path(self.tmp) / "pgid.txt"
+        res = self._run(
+            "hang", timeout_s=2, extra_env={"FAKE_CLAUDE_PIDFILE": str(pidfile)}
+        )
+        self.assertEqual(res.status, "timeout")
+        self.assertEqual(res.reason, "watchdog_timeout")
+        # The fake recorded its process-group id at startup; after invoke returns the
+        # group must be gone (no orphaned child).
+        self.assertTrue(pidfile.exists())
+        pgid = int(pidfile.read_text(encoding="utf-8").strip())
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+    def test_asks_is_invalid(self):
+        res = self._run("asks")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "askuserquestion_detected")
+
+    def test_badecho_is_invalid(self):
+        res = self._run("badecho")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "config_echo_mismatch")
+
+    def test_backgrounded_workflow_is_distinct_reason(self):
+        # A child whose Phase 3 Workflow ran detached and got killed at the CLI's
+        # background-wait ceiling (echo + payload absent for THAT reason) must be labeled
+        # workflow_backgrounded, NOT conflated with a genuine config_echo_mismatch. The
+        # "Background tasks still running after ...; terminating" notice is the signature.
+        res = self._run("bg_killed")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "workflow_backgrounded")
+        self.assertNotEqual(res.reason, "config_echo_mismatch")
+
+    def test_workflow_records_are_parsed_once_per_invocation(self):
+        # Each record embeds the whole bundle; the failure gate and the identity gate
+        # share one parse. Red when either gate re-walks the records itself.
+        calls = []
+        real = invoke._iter_new_wf_records
+
+        def counting(claude_home, baseline):
+            calls.append(1)
+            return real(claude_home, baseline)
+
+        with patch.object(invoke, "_iter_new_wf_records", counting):
+            res = self._run("all_degraded_then_ok")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(len(calls), 1)
+
+    def test_all_degraded_workflow_record_is_retryable_failure(self):
+        # Gate 2c must classify the pipeline's own all-degraded envelope instead of
+        # falling through to no_payload.
+        res = self._run("all_degraded")
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.reason, "all_degraded")
+
+    def test_all_degraded_without_echo_beats_config_gate(self):
+        # The envelope gate must run before the config echo gate, even when no echo exists.
+        res = self._run("all_degraded_no_echo")
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.reason, "all_degraded")
+
+    def test_all_degraded_gap_is_classified_from_gaps(self):
+        # A gap-only prefix is still the all-degraded envelope shape.
+        res = self._run("all_degraded_gap_only")
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.reason, "all_degraded")
+
+    def test_other_pipeline_failure_envelope_is_classified(self):
+        # Non-degraded ok:false returns remain retryable, with their own reason.
+        res = self._run("pipeline_failed")
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.reason, "pipeline_failed")
+
+    def test_successful_resume_record_supersedes_failure(self):
+        # A successful auto-resume wins regardless of the failing record's filename order.
+        res = self._run("all_degraded_then_ok")
+        self.assertEqual(res.status, "ok")
+
+    def test_stale_failure_record_is_left_to_identity_gate(self):
+        # The failure gate must ignore a record from another plugin checkout so gate 4
+        # can report the identity mismatch.
+        res = self._run("all_degraded_stale_script")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+    def test_claude_not_found(self):
+        # PATH without the fake -> claude cannot be resolved -> failed, not a crash.
+        empty_bin = Path(self.tmp) / "emptybin"
+        empty_bin.mkdir()
+        with patched_environ(PATH=str(empty_bin), FAKE_CLAUDE_MODE="ok"):
+            res = invoke_review(self.worktree, PR, self.run_dir, timeout_s=5)
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.reason, "claude_not_found")
+
+
+# ------------------------------------------------------------------- echo receipt source
+
+
+class EchoReceiptSourceTest(InvokeTestBase):
+    """The config-echo receipt is accepted from any of stdout, .result, or a report .md.
+
+    A ``-p --output-format json`` run hides intermediate-turn stdout, so the receipt is
+    only recoverable from the envelope's ``.result`` or the collected report markdown.
+    """
+
+    def test_receipt_only_in_result_is_ok(self):
+        res = self._run("echo_in_result")
+        # Block absent from raw stdout, present only in the envelope .result.
+        self.assertEqual(res.status, "ok")
+        self.assertTrue(res.echo_ok)
+
+    def test_receipt_only_in_report_md_is_ok(self):
+        res = self._run("echo_in_report")
+        # Block absent from stdout and .result, present only in a report .md.
+        self.assertEqual(res.status, "ok")
+        self.assertTrue(res.echo_ok)
+
+    def test_echo_ok_still_scans_any_markdown_filename(self):
+        receipt = "\n".join(
+            f"{key}={value}" for key, value in invoke.EXPECTED_ECHO.items()
+        )
+        with tempfile.TemporaryDirectory(prefix="echo-report-") as tmp:
+            (Path(tmp) / "deep-review-report.md").write_text(receipt, encoding="utf-8")
+            self.assertTrue(invoke._echo_ok("", {}, (tmp,)))
+
+    def test_archived_report_does_not_satisfy_echo(self):
+        receipt = "\n".join(
+            f"{key}={value}" for key, value in invoke.EXPECTED_ECHO.items()
+        )
+        with tempfile.TemporaryDirectory(prefix="echo-archive-") as tmp:
+            archived = Path(tmp) / "superseded" / "code-gauntlet-report-deadbeef.md"
+            archived.parent.mkdir()
+            archived.write_text(receipt, encoding="utf-8")
+            self.assertFalse(invoke._echo_in_reports((tmp,)))
+
+    def test_top_level_report_still_satisfies_echo(self):
+        receipt = "\n".join(
+            f"{key}={value}" for key, value in invoke.EXPECTED_ECHO.items()
+        )
+        with tempfile.TemporaryDirectory(prefix="echo-current-") as tmp:
+            (Path(tmp) / "code-gauntlet-report-deadbeef.md").write_text(
+                receipt, encoding="utf-8"
+            )
+            self.assertTrue(invoke._echo_in_reports((tmp,)))
+
+    def test_archived_code_rendered_report_does_not_provide_identity(self):
+        report = (
+            "Resolved config:\n"
+            "  pipeline_version=3.26.0 (bundle)\n"
+            "  plugin_root=/code-owned/plugin (resolved)\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="identity-archive-") as tmp:
+            archived = Path(tmp) / "superseded" / "code-gauntlet-report-deadbeef.md"
+            archived.parent.mkdir()
+            archived.write_text(report, encoding="utf-8")
+            self.assertIsNone(invoke.extract_identity_receipt("", {}, (tmp,)))
+
+    def test_top_level_code_rendered_report_still_provides_identity(self):
+        report = (
+            "Resolved config:\n"
+            "  pipeline_version=3.26.0 (bundle)\n"
+            "  plugin_root=/code-owned/plugin (resolved)\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="identity-current-") as tmp:
+            (Path(tmp) / "code-gauntlet-report-deadbeef.md").write_text(
+                report, encoding="utf-8"
+            )
+            self.assertEqual(
+                invoke.extract_identity_receipt("", {}, (tmp,)),
+                {
+                    "pipeline_version": "3.26.0",
+                    "plugin_root": "/code-owned/plugin",
+                },
+            )
+
+    def test_find_payload_ignores_archived_nested_payload(self):
+        with tempfile.TemporaryDirectory(prefix="payload-archive-") as tmp:
+            archived = Path(tmp) / "superseded" / "post-review-payload.json"
+            archived.parent.mkdir()
+            archived.write_text("{}", encoding="utf-8")
+            self.assertIsNone(invoke._find_payload(tmp))
+
+
+class PluginIdentityGuardTest(InvokeTestBase):
+    def test_wrong_plugin_root_in_echo_marks_invalid(self):
+        res = self._run("wrong_plugin_echo")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+    def test_missing_identity_lines_marks_invalid(self):
+        res = self._run("no_identity_echo")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+    def test_wrong_script_path_marks_invalid(self):
+        res = self._run("wrong_script_path")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+    def test_clean_identity_still_ok(self):
+        res = self._run("ok")
+        self.assertEqual(res.status, "ok")
+
+    def test_session_workflow_record_uses_name_and_bundle_identity(self):
+        res = self._run("by_name_record")
+        self.assertEqual(res.status, "ok", res.reason)
+
+        home = invoke._claude_home(self.run_dir, {})
+        record_path = (
+            home
+            / "config"
+            / "projects"
+            / "fake"
+            / "sess"
+            / "workflows"
+            / "wf_by_name.json"
+        )
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["workflowName"], "code-gauntlet-pipeline")
+        self.assertEqual(record["script"], BUNDLE_TEXT)
+        self.assertFalse(
+            invoke.script_path_matches_repo(record["scriptPath"], REPO_ROOT)
+        )
+
+    def _plant_wf(self, name, script_path, *, nested=False):
+        """Plant a wf_*.json under the shared claude-home derived from self.run_dir."""
+        home = invoke._claude_home(self.run_dir, os.environ)
+        wf_dir = home / "config" / "projects" / "shared" / "sess" / "workflows"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        path = wf_dir / name
+        if nested:
+            payload = {"runId": name, "input": {"scriptPath": script_path}}
+        else:
+            payload = {"runId": name, "scriptPath": script_path}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_preexisting_stale_wf_record_does_not_invalidate_clean_run(self):
+        """Baseline-diffing must ignore untouched leftover records in shared claude-home."""
+        self._plant_wf(
+            "wf_old.json",
+            "/home/ubuntu/.claude/plugins/cache/stale/workflows/pipeline.js",
+        )
+        res = self._run("ok")
+        self.assertEqual(res.status, "ok", res.reason)
+
+    def test_new_stale_wf_caught_alongside_baseline_record(self):
+        """A new bad record is still caught when an older untouched record also exists."""
+        self._plant_wf(
+            "wf_old.json",
+            "/home/ubuntu/.claude/plugins/cache/stale/workflows/pipeline.js",
+        )
+        res = self._run("wrong_script_path")
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+    def test_nested_wrapper_script_path_marks_invalid(self):
+        """invoke path must read scriptPath from input/toolInput/parameters wrappers."""
+        res = self._run(
+            "wrong_script_path",
+            extra_env={"FAKE_CLAUDE_WF_NESTED": "1"},
+        )
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_identity_mismatch")
+
+
+class V3PreflightTest(InvokeTestBase):
+    """A deep-review-v3 run preflights the child CLI's Workflow-tool support.
+
+    v3 dispatches through the Workflow tool (Claude Code >= 2.1.154). An older or
+    unreadable CLI is marked ``invalid`` (never scored) with a clear reason, before the
+    review is even launched; v2 skips the gate. The version probe is mocked so the check
+    is exercised without depending on the fake binary's --version output.
+    """
+
+    def test_old_cli_marks_invalid(self):
+        with patch.object(invoke, "_claude_version", lambda _bin: (2, 1, 100)):
+            res = self._run("ok")  # tool defaults to deep-review-v3
+        self.assertEqual(res.status, "invalid")
+        self.assertIn("v3_workflow_unsupported", res.reason)
+        self.assertIn("2.1.154", res.reason)
+        self.assertIn("2.1.100", res.reason)
+
+    def test_unreadable_version_marks_invalid(self):
+        with patch.object(invoke, "_claude_version", lambda _bin: None):
+            res = self._run("ok")
+        self.assertEqual(res.status, "invalid")
+        self.assertIn("v3_workflow_unsupported", res.reason)
+
+    def test_new_enough_cli_passes_preflight(self):
+        with patch.object(invoke, "_claude_version", lambda _bin: (2, 1, 154)):
+            res = self._run("ok")
+        self.assertEqual(res.status, "ok")
+
+    def test_v2_tool_skips_preflight_even_on_old_cli(self):
+        # A v2-labelled run needs no Workflow tool, so an old CLI still runs to completion.
+        with patch.object(invoke, "_claude_version", lambda _bin: (2, 1, 100)):
+            res = self._run("ok", tool="deep-review-v2")
+        self.assertEqual(res.status, "ok")
+
+    def test_preflight_reads_version_via_fake_binary(self):
+        # End-to-end through the real _claude_version + fake claude --version (no mock):
+        # FAKE_CLAUDE_VERSION drives an old CLI, proving the probe actually shells out.
+        res = self._run("ok", extra_env={"FAKE_CLAUDE_VERSION": "2.1.100"})
+        self.assertEqual(res.status, "invalid")
+        self.assertIn("2.1.100", res.reason)
+
+
+class ClaudeVersionParseTest(InvokeTestBase):
+    """_claude_version parses the CLI's --version output via the fake binary."""
+
+    def _bin(self, version=None):
+        bindir = self.install_fake()
+        if version is not None:
+            self.addCleanup(os.environ.pop, "FAKE_CLAUDE_VERSION", None)
+            os.environ["FAKE_CLAUDE_VERSION"] = version
+        return str(bindir / "claude")
+
+    def test_parses_semver_tuple(self):
+        self.assertEqual(invoke._claude_version(self._bin("2.1.154")), (2, 1, 154))
+
+    def test_unparseable_returns_none(self):
+        self.assertIsNone(invoke._claude_version(self._bin("no-version-here")))
+
+    def test_missing_binary_returns_none(self):
+        self.assertIsNone(
+            invoke._claude_version(str(Path(self.tmp) / "nope" / "claude"))
+        )
+
+
+class PluginMutationGuardTest(InvokeTestBase):
+    """invoke.py's plugin-repo integrity guard. A child that writes into REPO_ROOT
+    mid-run (self-healing the plugin) contaminates the measurement: the PR is marked
+    invalid ('plugin_mutated_by_child') and the repo is reset. Pre-existing local edits
+    (captured as the baseline) and the controller-owned experiments.jsonl are exempt.
+    Each test points invoke.REPO_ROOT at a throwaway git repo so the real plugin is
+    never touched."""
+
+    def _init_repo(self, files):
+        import subprocess
+
+        root = Path(self.tmp) / "plugin"
+        root.mkdir()
+        files = {
+            "workflows/pipeline.js": "const PIPELINE_VERSION = '3.1.3';\n",
+            **files,
+        }
+        for rel, content in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "add", "-A"],
+            ["git", "commit", "-q", "-m", "baseline"],
+        ):
+            subprocess.run(cmd, cwd=str(root), check=True, capture_output=True, env=env)
+        return root
+
+    def _porcelain(self, root):
+        import subprocess
+
+        return subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+
+    def _run_mutating(self, root, mutate_path):
+        with patch.object(invoke, "REPO_ROOT", root):
+            return self._run(
+                "mutate_repo", extra_env={"FAKE_CLAUDE_MUTATE_PATH": str(mutate_path)}
+            )
+
+    def test_untracked_file_mutation_marks_invalid_and_removes_file(self):
+        root = self._init_repo({"README.md": "base\n"})
+        injected = root / "workflows" / "src" / "injected.js"
+        res = self._run_mutating(root, injected)
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_mutated_by_child")
+        self.assertFalse(injected.exists(), "untracked child file removed on reset")
+        self.assertEqual(self._porcelain(root), "", "plugin repo clean after reset")
+
+    def test_tracked_file_modification_marks_invalid_and_reverts(self):
+        root = self._init_repo({"workflows/src/filterFindings.js": "ORIGINAL\n"})
+        target = root / "workflows" / "src" / "filterFindings.js"
+        res = self._run_mutating(root, target)
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_mutated_by_child")
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            "ORIGINAL\n",
+            "tracked edit reverted on reset",
+        )
+        self.assertEqual(self._porcelain(root), "")
+
+    def test_controller_owned_experiments_jsonl_is_not_flagged(self):
+        root = self._init_repo({"bench/experiments.jsonl": "{}\n"})
+        target = root / "bench" / "experiments.jsonl"
+        res = self._run_mutating(root, target)
+        self.assertEqual(
+            res.status, "ok", "a controller-owned change is not child contamination"
+        )
+        self.assertNotEqual(
+            self._porcelain(root),
+            "",
+            "experiments.jsonl left modified (controller owns it)",
+        )
+
+    def test_controller_owned_report_html_is_not_flagged(self):
+        # The live dashboard (regenerated from the ledger by bench/report.py, typically run
+        # mid-run to watch progress) is a tracked file stamped with today's date + sha, so any
+        # regeneration dirties it. It is operator-owned, NOT child contamination: a regeneration
+        # while a review child is in-flight must not invalidate that PR or reset the dashboard.
+        root = self._init_repo({"bench/report.html": "<html>old</html>\n"})
+        target = root / "bench" / "report.html"
+        res = self._run_mutating(root, target)
+        self.assertEqual(
+            res.status,
+            "ok",
+            "a controller-owned dashboard regeneration is not child contamination",
+        )
+        self.assertNotEqual(
+            self._porcelain(root), "", "report.html left modified (operator owns it)"
+        )
+
+    def test_preexisting_local_edit_is_not_flagged_or_reset(self):
+        # A dirty file that predates the child (the run's baseline) must survive untouched
+        # — the guard flags DELTA, not absolute dirtiness.
+        root = self._init_repo({"workflows/src/run.js": "COMMITTED\n"})
+        preexisting = root / "workflows" / "src" / "run.js"
+        preexisting.write_text(
+            "LOCAL WIP\n", encoding="utf-8"
+        )  # dirty BEFORE the child runs
+        injected = root / "agents" / "injected.md"
+        res = self._run_mutating(root, injected)
+        # The child's NEW file is flagged + removed; the pre-existing edit is preserved.
+        self.assertEqual(res.status, "invalid")
+        self.assertEqual(res.reason, "plugin_mutated_by_child")
+        self.assertFalse(injected.exists())
+        self.assertEqual(
+            preexisting.read_text(encoding="utf-8"),
+            "LOCAL WIP\n",
+            "pre-existing local edit untouched",
+        )
+
+    def test_clean_run_is_not_flagged(self):
+        root = self._init_repo({"README.md": "base\n"})
+        with patch.object(invoke, "REPO_ROOT", root):
+            res = self._run("ok")  # no mutation
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(self._porcelain(root), "", "clean repo stays clean")
+
+
+class ChildModelCommandTest(InvokeTestBase):
+    """child_model appends ``--model <m>`` to the child command unless inheriting."""
+
+    def _argv(self, res_env):
+        argv_file = Path(self.tmp) / "argv.txt"
+        # The fake records its argv (minus argv[0]) to FAKE_CLAUDE_ARGV_FILE on the main
+        # invocation (not the --version probe), one arg per line.
+        res_env["FAKE_CLAUDE_ARGV_FILE"] = str(argv_file)
+        return argv_file
+
+    def test_v3_command_carries_model_sonnet(self):
+        env = {}
+        argv_file = self._argv(env)
+        res = self._run(
+            "ok", tool="deep-review-v3", child_model="sonnet", extra_env=env
+        )
+        self.assertEqual(res.status, "ok")
+        argv = argv_file.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+
+    def test_opus_child_model_carried_verbatim(self):
+        env = {}
+        argv_file = self._argv(env)
+        res = self._run("ok", child_model="opus", extra_env=env)
+        self.assertEqual(res.status, "ok")
+        argv = argv_file.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+
+    def test_inherit_omits_model_flag(self):
+        env = {}
+        argv_file = self._argv(env)
+        res = self._run("ok", child_model="inherit", extra_env=env)
+        self.assertEqual(res.status, "ok")
+        self.assertNotIn("--model", argv_file.read_text(encoding="utf-8").splitlines())
+
+
+class InvokeReviewChildAuthTest(InvokeTestBase):
+    """invoke_review is a pass-through for the auth mode.
+
+    build_env owns the whole credential decision; invoke_review must not re-derive or
+    default it, or a subscription run would silently fall back to the metered key.
+    """
+
+    @contextlib.contextmanager
+    def _build_env_spy(self):
+        seen = {}
+        real = invoke.build_env
+
+        def spy(pr, run_dir, base_env, child_auth="api"):
+            seen["child_auth"] = child_auth
+            # Run the real assembly in api mode: this test is about the plumbing, and
+            # no live subscription token exists here.
+            return real(pr, run_dir, base_env)
+
+        with patch.object(invoke, "build_env", spy):
+            yield seen
+
+    def test_forwards_explicit_child_auth(self):
+        with self._build_env_spy() as seen:
+            res = self._run("ok", child_auth="subscription")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(seen["child_auth"], "subscription")
+
+    def test_defaults_to_api(self):
+        with self._build_env_spy() as seen:
+            bindir = self.install_fake()
+            overrides = {
+                "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                "FAKE_CLAUDE_MODE": "ok",
+            }
+            with patched_environ(**overrides):
+                res = invoke_review(self.worktree, PR, self.run_dir, timeout_s=30)
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(seen["child_auth"], "api")
+
+
+class ChildProcessCredentialEnvTest(InvokeTestBase):
+    """What the CHILD process actually received, across the subprocess boundary.
+
+    Every other auth test inspects ``build_env``'s return value, which proves the dict is
+    right but not that the dict is what ``claude`` runs with. This mode's whole promise is
+    that the metered key never reaches the child, so the fake records its own view of the
+    credential vars (presence only -- never values) and the assertions read that.
+    """
+
+    POLLUTED: ClassVar[dict[str, str]] = {
+        "ANTHROPIC_API_KEY": "sk-ambient-polluted",
+        "ANTHROPIC_AUTH_TOKEN": "at-ambient-should-not-arrive",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "CLAUDE_CODE_USE_FOUNDRY": "1",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oat-ambient",
+    }
+
+    def setUp(self):
+        super().setUp()
+        # No bench/.env: the ambient values above are then the only credential source, so
+        # the assertions describe exactly what the mode did with them.
+        saved = invoke.ENV_PATH
+        invoke.ENV_PATH = Path(self.tmp) / "absent.env"
+        self.addCleanup(setattr, invoke, "ENV_PATH", saved)
+        self.env_file = Path(self.tmp) / "child-credentials.json"
+
+    def _child_saw(self, child_auth):
+        result = self._run(
+            "ok",
+            extra_env={**self.POLLUTED, "FAKE_CLAUDE_ENV_FILE": str(self.env_file)},
+            child_auth=child_auth,
+        )
+        self.assertEqual(result.status, "ok", result.reason)
+        return json.loads(self.env_file.read_text(encoding="utf-8"))
+
+    # Spelled out rather than read from invoke._OUTRANKING_CREDENTIAL_VARS: a test that
+    # iterates the list it is checking passes vacuously the moment that list is emptied,
+    # which is exactly the regression it exists to catch.
+    MUST_NOT_REACH_CHILD = (
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    )
+
+    def test_subscription_child_receives_only_the_oauth_token(self):
+        saw = self._child_saw("subscription")
+        self.assertTrue(saw["CLAUDE_CODE_OAUTH_TOKEN"])
+        for name in self.MUST_NOT_REACH_CHILD:
+            self.assertFalse(saw[name], f"{name} reached the child")
+
+    def test_the_strip_list_covers_every_var_this_test_names(self):
+        # Keeps the hardcoded list above honest in the other direction: if the chain grows
+        # a source, the production constant and this test must both learn about it.
+        self.assertEqual(
+            sorted(invoke._OUTRANKING_CREDENTIAL_VARS),
+            sorted(self.MUST_NOT_REACH_CHILD),
+        )
+
+    def test_api_child_receives_the_ambient_key(self):
+        # The mirror image, from the same harness: api mode passes the key through, so a
+        # false pass in the test above would have to survive this one too.
+        saw = self._child_saw("api")
+        self.assertTrue(saw["ANTHROPIC_API_KEY"])
+
+
+class IdentityReceiptHelpersTest(unittest.TestCase):
+    def test_read_pipeline_version_from_bundle(self):
+        ver = invoke.read_pipeline_version(REPO_ROOT)
+        self.assertRegex(ver, r"^\d+\.\d+\.\d+")
+
+    def test_pipeline_meta_name_matches_source_oracle(self):
+        self.assertEqual(invoke.PIPELINE_META_NAME, EXPECTED_PIPELINE_META_NAME)
+        self.assertEqual(invoke._read_pipeline_meta_name(), EXPECTED_PIPELINE_META_NAME)
+
+    def test_read_pipeline_meta_name_missing_source_returns_none(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(invoke, "REPO_ROOT", Path(tmp)),
+        ):
+            self.assertIsNone(invoke._read_pipeline_meta_name())
+
+    def test_parse_identity_echo_extracts_both_fields(self):
+        text = (
+            "Headless config:\n"
+            "  model_tier=optimized (env)\n"
+            "  pipeline_version=3.1.3 (bundle)\n"
+            "  plugin_root=/tmp/plugin (resolved)\n"
+        )
+        got = invoke.parse_identity_echo(text)
+        self.assertEqual(got["pipeline_version"], "3.1.3")
+        self.assertEqual(got["plugin_root"], "/tmp/plugin")
+
+    def test_parse_identity_echo_preserves_plugin_root_spaces(self):
+        got = invoke.parse_identity_echo(
+            "plugin_root=/home/user/My Plugin/cg (resolved)\n"
+        )
+        self.assertEqual(got["plugin_root"], "/home/user/My Plugin/cg")
+
+    def test_parse_identity_echo_missing_returns_partial(self):
+        got = invoke.parse_identity_echo("pipeline_version=1.0.0 (bundle)\n")
+        self.assertEqual(got.get("pipeline_version"), "1.0.0")
+        self.assertNotIn("plugin_root", got)
+
+    def test_record_identity_rejects_lone_surrogate_without_raising(self):
+        record = {
+            "workflowName": EXPECTED_PIPELINE_META_NAME,
+            "script": BUNDLE_TEXT + "\ud800",
+        }
+        self.assertFalse(invoke.record_identifies_repo_bundle(record, REPO_ROOT))
+        self.assertIn(
+            "script bytes differ",
+            invoke.workflow_record_identity_reason(record, REPO_ROOT),
+        )
+
+    def test_extract_identity_receipt_from_envelope_result(self):
+        block = (
+            "Headless config:\n"
+            "  pipeline_version=3.1.3 (bundle)\n"
+            "  plugin_root=/abs/plugin (resolved)\n"
+        )
+        env = {"type": "result", "result": block}
+        got = invoke.extract_identity_receipt("", env, ())
+        self.assertEqual(got["plugin_root"], "/abs/plugin")
+        self.assertEqual(got["pipeline_version"], "3.1.3")
+
+    def test_extract_identity_receipt_prefers_envelope_result_over_stdout(self):
+        envelope = {
+            "type": "result",
+            "result": (
+                "Headless config:\n"
+                "  pipeline_version=envelope-version (bundle)\n"
+                "  plugin_root=/envelope/plugin (resolved)\n"
+            ),
+        }
+        got = invoke.extract_identity_receipt(
+            "Headless config:\n"
+            "  pipeline_version=stdout-version (bundle)\n"
+            "  plugin_root=/stdout/plugin (resolved)\n",
+            envelope,
+            (),
+        )
+        self.assertEqual(
+            got,
+            {"pipeline_version": "envelope-version", "plugin_root": "/envelope/plugin"},
+        )
+
+    def test_extract_identity_receipt_prefers_code_rendered_report_over_other_sources(
+        self,
+    ):
+        report = (
+            "## Review Methodology\n```text\n"
+            "Resolved config:\n"
+            "  pipeline_version=3.26.0 (bundle)\n"
+            "  plugin_root=/code-owned/plugin (resolved)\n"
+            "```\n"
+        )
+        envelope = {
+            "type": "result",
+            "result": "pipeline_version=model-typed (bundle)\nplugin_root=/model/plugin (resolved)",
+        }
+        wrong_context = (
+            "## Review Context\n```text\n"
+            "pipeline_version=context-version (bundle)\n"
+            "plugin_root=/context/plugin (resolved)\n"
+            "```\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="identity-report-") as tmp:
+            # This sorts before the report and proves context/patch artifacts cannot
+            # outrank the code-owned rendered report.
+            (Path(tmp) / "code-gauntlet-context-deadbeef.md").write_text(
+                wrong_context, encoding="utf-8"
+            )
+            (Path(tmp) / "code-gauntlet-report-deadbeef.md").write_text(
+                report, encoding="utf-8"
+            )
+            got = invoke.extract_identity_receipt(
+                "pipeline_version=stdout-typed (bundle)\nplugin_root=/stdout/plugin (resolved)",
+                envelope,
+                (tmp,),
+            )
+        self.assertEqual(
+            got, {"pipeline_version": "3.26.0", "plugin_root": "/code-owned/plugin"}
+        )
+
+
+class ScriptPathMatchesRepoTest(unittest.TestCase):
+    def test_relative_paths_are_repo_relative_not_cwd_relative(self):
+        with tempfile.TemporaryDirectory(prefix="bench-script-cwd-") as tmp:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                self.assertNotEqual(Path.cwd(), REPO_ROOT)
+                self.assertTrue(
+                    invoke.script_path_matches_repo("workflows/pipeline.js", REPO_ROOT)
+                )
+                self.assertTrue(
+                    invoke.script_path_matches_repo(
+                        "./workflows/pipeline.js", REPO_ROOT
+                    )
+                )
+            finally:
+                os.chdir(old_cwd)
+
+    def test_check_and_invoke_agree_on_relative_forms(self):
+        from bench.runner import check as check_mod
+
+        expected = REPO_ROOT / "workflows" / "pipeline.js"
+        for rel in ("workflows/pipeline.js", "./workflows/pipeline.js"):
+            self.assertEqual(
+                invoke.script_path_matches_repo(rel, REPO_ROOT),
+                check_mod._script_path_ok(rel, expected, repo_root=REPO_ROOT),
+            )
+
+
+class WorkflowScriptPathScanTest(unittest.TestCase):
+    """Unit coverage for baseline-diffing and nested wrapper extraction."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bench-wf-scan-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = Path(self.tmp) / "claude-home"
+        self.wf_dir = self.home / "config" / "projects" / "p" / "s" / "workflows"
+        self.wf_dir.mkdir(parents=True)
+
+    def _write(self, name, payload):
+        path = self.wf_dir / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_baseline_excludes_unchanged_and_keeps_new(self):
+        old = self._write(
+            "wf_old.json",
+            {"scriptPath": "/stale/old/workflows/pipeline.js"},
+        )
+        baseline = invoke.snapshot_workflow_records(self.home)
+        self.assertIn(str(old.resolve()), baseline)
+        self._write(
+            "wf_new.json",
+            {"scriptPath": "/stale/new/workflows/pipeline.js"},
+        )
+        paths = invoke._new_workflow_script_paths(self.home, baseline)
+        self.assertEqual(paths, ["/stale/new/workflows/pipeline.js"])
+
+    def test_nested_wrapper_script_path_extracted(self):
+        self._write(
+            "wf_wrap.json",
+            {
+                "runId": "wf_wrap",
+                "input": {"scriptPath": "/stale/wrap/workflows/pipeline.js"},
+            },
+        )
+        paths = invoke._new_workflow_script_paths(self.home, {})
+        self.assertEqual(paths, ["/stale/wrap/workflows/pipeline.js"])
+
+    def test_scriptpath_from_record_ignores_args_verify(self):
+        sp = invoke.scriptpath_from_record(
+            {
+                "scriptPath": "/repo/workflows/pipeline.js",
+                "args": {"verify": {"scriptPath": "/repo/scripts/verify_findings.py"}},
+            }
+        )
+        self.assertEqual(sp, "/repo/workflows/pipeline.js")
+
+
+class WorkflowFailureTest(unittest.TestCase):
+    """Unit coverage for correlated Workflow return envelopes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bench-wf-failure-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = Path(self.tmp) / "claude-home"
+        self.wf_dir = self.home / "config" / "projects" / "p" / "s" / "workflows"
+        self.wf_dir.mkdir(parents=True)
+        self.output_dir = Path(self.tmp) / "output"
+        self.output_dir.mkdir()
+        self.pipeline = str(REPO_ROOT / "workflows" / "pipeline.js")
+
+    def _write(
+        self,
+        name,
+        result,
+        *,
+        output_dir=None,
+        script_path=None,
+        args=None,
+        workflow_name=None,
+        script=None,
+    ):
+        record_args = (
+            args
+            if args is not None
+            else {
+                "outputDir": str(output_dir or self.output_dir),
+                "nonce": "unit",
+                "repoRoot": str(REPO_ROOT),
+            }
+        )
+        path = self.wf_dir / name
+        record = {
+            "scriptPath": script_path or self.pipeline,
+            "args": record_args,
+            "result": result,
+        }
+        if workflow_name is not None:
+            record["workflowName"] = workflow_name
+        if script is not None:
+            record["script"] = script
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return path
+
+    def _failure(self, baseline=None, output_dir=None):
+        return invoke._workflow_failure(
+            self.home,
+            baseline or {},
+            REPO_ROOT,
+            output_dir or self.output_dir,
+        )
+
+    def test_wrapped_record_reads_args_from_the_same_wrapper(self):
+        # scriptPath and args travel together under one wrapper key on some CLI
+        # versions; correlation must read args from where the scriptPath came from.
+        path = self.wf_dir / "wf_wrapped.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "runId": "wf_wrapped",
+                    "input": {
+                        "scriptPath": self.pipeline,
+                        "args": {"outputDir": str(self.output_dir), "nonce": "unit"},
+                    },
+                    "result": {"ok": False, "error": "all-degraded: nothing ran"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self._failure(), ("all_degraded", "all-degraded: nothing ran"))
+
+    def test_success_before_failure_supersedes_in_sorted_order(self):
+        self._write("wf_a_ok.json", {"ok": True})
+        self._write("wf_z_fail.json", {"ok": False, "error": "pipeline failed"})
+        self.assertIsNone(self._failure())
+
+    def test_success_after_failure_supersedes_in_sorted_order(self):
+        self._write("wf_a_fail.json", {"ok": False, "error": "pipeline failed"})
+        self._write("wf_z_ok.json", {"ok": True})
+        self.assertIsNone(self._failure())
+
+    def test_unparseable_record_is_skipped(self):
+        (self.wf_dir / "wf_bad.json").write_text("not json", encoding="utf-8")
+        self._write("wf_good.json", {"ok": False, "error": "pipeline failed"})
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_missing_or_unparseable_args_are_skipped(self):
+        (self.wf_dir / "wf_missing_args.json").write_text(
+            json.dumps(
+                {
+                    "scriptPath": self.pipeline,
+                    "result": {"ok": False, "error": "pipeline failed"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._write(
+            "wf_bad_args.json",
+            {"ok": False, "error": "pipeline failed"},
+            args="not json",
+        )
+        self._write(
+            "wf_good.json",
+            {"ok": False, "error": "pipeline failed"},
+        )
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_non_dict_result_is_skipped(self):
+        self._write("wf_bad.json", "not a result")
+        self._write("wf_good.json", {"ok": False, "error": "pipeline failed"})
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_different_output_dir_does_not_supersede(self):
+        other = Path(self.tmp) / "other-output"
+        other.mkdir()
+        self._write("wf_a_fail.json", {"ok": False, "error": "pipeline failed"})
+        self._write("wf_z_ok.json", {"ok": True}, output_dir=other)
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_json_string_args_correlate_like_dict_args(self):
+        args = json.dumps({"outputDir": str(self.output_dir)})
+        self._write(
+            "wf_string_args.json",
+            {"ok": False, "error": "pipeline failed"},
+            args=args,
+        )
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_first_sorted_failure_wins_after_all_degraded(self):
+        # Sorted record order is the deterministic tie-breaker when failures coexist.
+        self._write(
+            "wf_pipeline.json",
+            {"ok": False, "error": "checkpoint-shape: bad phase"},
+        )
+        self._write(
+            "wf_alldeg.json",
+            {"ok": False, "error": "all-degraded: no discovery"},
+        )
+        self.assertEqual(
+            self._failure(), ("all_degraded", "all-degraded: no discovery")
+        )
+
+    def test_empty_error_uses_failing_phase(self):
+        self._write(
+            "wf_phase.json",
+            {"ok": False, "error": "", "failingPhase": "checkpoints"},
+        )
+        self.assertEqual(self._failure(), ("pipeline_failed", "checkpoints"))
+
+    def test_workflow_failure_classifies_by_name_record(self):
+        self._write(
+            "wf_by_name.json",
+            {"ok": False, "error": "pipeline failed"},
+            script_path="/session/workflows/code-gauntlet-pipeline-wf.js",
+            workflow_name=EXPECTED_PIPELINE_META_NAME,
+            script=BUNDLE_TEXT,
+        )
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_workflow_failure_classifies_by_name_record_without_script_path(self):
+        path = self.wf_dir / "wf_by_name_no_path.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "runId": "wf_by_name_no_path",
+                    "workflowName": EXPECTED_PIPELINE_META_NAME,
+                    "script": BUNDLE_TEXT,
+                    "args": {"outputDir": str(self.output_dir)},
+                    "result": {"ok": False, "error": "pipeline failed"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self._failure(), ("pipeline_failed", "pipeline failed"))
+
+    def test_wrapper_record_uses_top_level_identity_and_nested_args(self):
+        for wrapper in ("input", "toolInput"):
+            with self.subTest(wrapper=wrapper):
+                path = self.wf_dir / f"wf_{wrapper}.json"
+                record = {
+                    "runId": path.stem,
+                    "workflowName": EXPECTED_PIPELINE_META_NAME,
+                    "script": BUNDLE_TEXT,
+                    wrapper: {
+                        "scriptPath": "/session/workflows/code-gauntlet-pipeline-wf.js",
+                        "args": {"outputDir": str(self.output_dir), "nonce": "unit"},
+                    },
+                    "result": {"ok": False, "error": "pipeline failed"},
+                }
+                path.write_text(json.dumps(record), encoding="utf-8")
+                self.assertTrue(invoke.record_identifies_repo_bundle(record, REPO_ROOT))
+                self.assertEqual(
+                    self._failure(), ("pipeline_failed", "pipeline failed")
+                )
+                args_only = dict(record)
+                args_only[wrapper] = {"args": record[wrapper]["args"]}
+                args_only_path = self.wf_dir / f"wf_{wrapper}_args_only.json"
+                args_only_path.write_text(json.dumps(args_only), encoding="utf-8")
+                self.assertIs(invoke._record_args_holder(args_only), args_only[wrapper])
+                self.assertEqual(
+                    invoke._workflow_failure(
+                        self.home,
+                        {},
+                        REPO_ROOT,
+                        self.output_dir,
+                        records=[(args_only_path, args_only)],
+                    ),
+                    ("pipeline_failed", "pipeline failed"),
+                )
+
+    def _identity_text(self):
+        return "\n".join(
+            [
+                *(f"{key}={value}" for key, value in invoke.EXPECTED_ECHO.items()),
+                f"pipeline_version={invoke.read_pipeline_version(REPO_ROOT)} (bundle)",
+                f"plugin_root={REPO_ROOT} (resolved)",
+            ]
+        )
+
+    def _check_identity_record(self, record):
+        return invoke._check_plugin_identity(
+            self._identity_text(),
+            None,
+            (),
+            self.home,
+            {},
+            REPO_ROOT,
+            records=[(self.wf_dir / "wf_identity.json", record)],
+        )
+
+    def test_plugin_identity_accepts_by_name_record(self):
+        error = self._check_identity_record(
+            {
+                "scriptPath": "/session/workflows/code-gauntlet-pipeline-wf.js",
+                "workflowName": EXPECTED_PIPELINE_META_NAME,
+                "script": BUNDLE_TEXT,
+            }
+        )
+        self.assertIsNone(error, error)
+
+    def test_plugin_identity_rejects_different_by_name_bundle(self):
+        error = self._check_identity_record(
+            {
+                "scriptPath": "/session/workflows/code-gauntlet-pipeline-wf.js",
+                "workflowName": EXPECTED_PIPELINE_META_NAME,
+                "script": DIFFERENT_BUNDLE_TEXT,
+            }
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("script bytes differ", error)
+        self.assertTrue(error.startswith("scriptPath '/session/workflows"), error)
+
+    def test_pipeline_bundle_hash_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-pipeline.js"
+            self.assertIsNone(invoke.pipeline_bundle_sha256(tmp, missing))
+
+    def test_identity_reason_loads_expected_hash_when_not_supplied(self):
+        record = {
+            "workflowName": EXPECTED_PIPELINE_META_NAME,
+            "script": BUNDLE_TEXT + "different",
+        }
+        with patch.object(
+            invoke, "pipeline_bundle_sha256", return_value="not-the-script-hash"
+        ) as load_hash:
+            reason = invoke.workflow_record_identity_reason(record, REPO_ROOT)
+        self.assertIn("script bytes differ", reason)
+        load_hash.assert_called_once_with(REPO_ROOT, None)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+def test_bench_resolver_sets_trace_without_prompt_instructions():
+    from gauntlet.config import resolve
+
+    assert (
+        resolve("headless", invoke.BENCH_ENV, None, "pr")["waist"]["measurementTrace"]
+        is True
+    )
+    for mode in ("headless", "interactive"):
+        assert "measurementTrace" not in resolve(mode, {}, None, "pr")["waist"]

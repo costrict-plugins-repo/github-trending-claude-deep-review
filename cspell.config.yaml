@@ -1,0 +1,76 @@
+version: "0.2"
+language: en
+
+words:
+  - Liatrio
+  - claudemd
+  - cubic
+  - dedup
+  - deserialization
+  - dispatcher
+  - distros
+  - frontmatter
+  - glab
+  - gitleaks
+  - goldens
+  - liatrio
+  - markdownlint
+  - merkle
+  - ndjson
+  - opensource
+  - precommit
+  - pyproject
+  - pytest
+  - reviewdog
+  - skillset
+  - SKILL
+  - SSRF
+  - subagent
+  - subagents
+  - SubmitReview
+  - tomli
+
+ignorePaths:
+  - .git/**
+  - .venv/**
+  - __pycache__/**
+  - .pytest_cache/**
+  # deep-review-* entries retained for pre-rename local dirs
+  - deep-review-workspace/**
+  - code-gauntlet-workspace/**
+  - .deep-review/**
+  - .code-gauntlet/**
+  - docs/temp/**
+
+ignoreRegExpList:
+  # Fenced code blocks
+  - /```[\s\S]*?```/g
+  - /<pre><code>[\s\S]*?<\/code><\/pre>/g
+  # Inline code
+  - /`[^`]+`/g
+  # URLs
+  - /https?:\/\/\S+/g
+
+overrides:
+  - filename: README.md
+    words:
+      - dedup
+      - GitOps
+      - newlines
+      - Octo
+      - reranking
+
+  - filename: CONTRIBUTING.md
+    words:
+      - autoupdate
+      - commitlint
+      - markdownlint
+      # Load-bearing: the ignoreRegExpList inline-code pattern loses backtick pairing
+      # after a fenced block, so `queueMicrotask` in the workflow-runtime section is
+      # spell-checked despite being inline code. Removing this fails cspell.
+      - queueMicrotask
+
+  - filename: SECURITY.md
+    words:
+      - exfiltration
+      - hostnames

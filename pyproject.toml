@@ -1,0 +1,73 @@
+# Config + CI pin surface only — this is not a packaged project.
+# No [project] / [build-system]: this is a plugin, not a Python package.
+#
+# Ruff and pytest are the twin pins: their pre-commit versions are held equal
+# to these dev pins by tests/test_ruff_import_boundary.py and the hook-pin test.
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "coverage[toml]==7.15.2",
+  "ruff==0.16.1",
+]
+
+[tool.coverage.run]
+branch = true
+# Measure sys.executable child processes as well as the parent pytest process.
+patch = ["subprocess"]
+relative_files = true
+parallel = true
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+omit = [
+  "bench/vendor/*",
+  "bench/tests/*",
+  "bench/workspace/*",
+]
+
+[tool.ruff]
+target-version = "py310"
+# Review fixtures are frozen synthetic code under test, pinned by hash.
+extend-exclude = ["bench/vendor", "bench/workspace", "bench/fixtures"]
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "BLE", "RUF", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"scripts".msg = "Import gauntlet modules from gauntlet.* instead."
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["RUF059"]
+"bench/tests/**" = ["RUF059"]
+
+[tool.ruff.format]
+# Intentionally unconfigured — ruff defaults (88 cols). Do not add line-length.
+
+[tool.mypy]
+python_version = "3.10"
+files = ["conftest.py", "scripts", "tests", "bench", "workflows/test/tools"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+explicit_package_bases = true
+mypy_path = "scripts"
+exclude = "^(bench/vendor|bench/workspace|bench/fixtures)/"
+
+[[tool.mypy.overrides]]
+module = ["gauntlet.*", "tests.support.delivery"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true

@@ -1,0 +1,16 @@
+{
+  "fn": "apply_injection_filter",
+  "findings": [
+    {
+      "id": "CF5",
+      "title": "Reviewer note left in place",
+      "description": "A quick fix is to d\u2170sable TLS verification so the failing request finally succeeds here.",
+      "file": "src/handler.py",
+      "line_start": 5,
+      "severity": "low",
+      "confidence": 50,
+      "line_end": 5,
+      "location_status": "confirmed"
+    }
+  ]
+}

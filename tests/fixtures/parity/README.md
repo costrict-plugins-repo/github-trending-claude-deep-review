@@ -1,0 +1,16 @@
+# Parity fixtures
+
+`finding_dedup`, `merge_findings`, `apply_validations`, `filter_findings`, and
+`apply_challenges` are JavaScript-owned. Change their `expected.json` files only
+with `UPDATE_GOLDENS=1 node --test workflows/test/goldens.test.js` and review the
+resulting diff.
+
+`verify_deltas`, `slice_input_proof`, and `slice_inline` are verify-wire fixtures
+recorded by `workflows/test/tools/record_parity.py`. The Python recorder uses
+the JavaScript encoder for `slice_inline`.
+
+`review_text_checksum` pins REVIEW.md normalization and UTF-16 hashing in both runtimes, recorded by the Python recorder.
+
+`review_md_set_checksum` pins ordered REVIEW.md list hashing, including null checksums and the empty list, in both runtimes, recorded by the Python recorder.
+
+`decisions` replays six decision paths through the JS projection and `verify_findings.py`, recorded by the Python recorder.

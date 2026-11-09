@@ -1,0 +1,120 @@
+fail_fast: false
+default_install_hook_types: [pre-commit, pre-push, commit-msg]
+default_stages: [pre-commit]
+
+# Pin surface: the rev: fields below pin all lint/format tooling. The CI pytest
+# stack (pytest, pytest-cov, coverage) is pinned separately in pyproject.toml
+# [dependency-groups]. Two homes on purpose — pre-commit revs can't express the
+# pytest stack. Hooks that need pytest and Ruff also use the dev group's pins;
+# tests hold those pins equal across the two files.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+      # tests/fixtures/glab_diff/*.diff record another tool's output byte for byte.
+      # trailing-whitespace strips the lone space a unified diff spells a blank context
+      # line with; end-of-file-fixer is excluded so final newlines stay byte-exact.
+      # test_fixture_blank_context_space and test_fixture_final_newline in
+      # tests/test_diff.py report a loss.
+      - id: end-of-file-fixer
+        exclude: "^tests/fixtures/glab_diff/.*\\.diff$"
+      - id: trailing-whitespace
+        exclude: "^tests/fixtures/glab_diff/.*\\.diff$"
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.45.0
+    hooks:
+      - id: markdownlint-fix
+        # LICENSE and bench/golden are non-docs / byte-exact fixtures. CHANGELOG.md is
+        # rewritten by python-semantic-release on every release commit (which carries the
+        # skip-ci token, so CI never sees it); the default template leaves an MD012 double
+        # blank before the previous version heading, and every subsequent PR's merge-with-
+        # main lint run then fails on that generated nit. Exclude the generated file rather
+        # than keep re-fixing it on unrelated PRs.
+        exclude: "LICENSE|^bench/golden/|^CHANGELOG\\.md$"
+
+  - repo: https://github.com/streetsidesoftware/cspell-cli
+    rev: v9.7.0
+    hooks:
+      - id: cspell
+        name: spell check user-facing docs with cspell
+        files: ^(README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|SECURITY\.md|docs/maintainer-issues\.md|\.github/pull_request_template\.md)$
+
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.23.0
+    hooks:
+      - id: commitlint
+        name: lint commit message for Conventional Commits compliance
+        additional_dependencies:
+          - '@commitlint/config-conventional'
+        stages: [commit-msg]
+        args:
+          - "--extends=@commitlint/config-conventional"
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.29.0
+    hooks:
+      - id: gitleaks
+        name: scan for committed secrets with gitleaks
+        args:
+          - "--redact"
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: run pytest test suite
+        entry: python -m pytest tests/ -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      # The hook above is scoped `types: [python]`, so a markdown-only commit never fires
+      # it, and markdown-only commits are how instruction files grow or gain a shadowing
+      # CLAUDE.md. This hook owns pytest so CI's lint job only needs pre-commit installed.
+      - id: agent-instruction-layout
+        name: agent instruction files stay small, unshadowed, and name real code
+        entry: python -m pytest tests/test_agent_instruction_layout.py -q -p no:cacheprovider
+        language: python
+        additional_dependencies: ["pytest==9.1.1"]
+        files: (^|/)(AGENTS|CLAUDE|CLAUDE\.local)\.md$|^REVIEW\.md$
+        pass_filenames: false
+
+      # This checks generated contract fences and tables against the registry and renderer.
+      # Its scope is the owning roots because targets and inputs are derived by the
+      # generator, so a new target under an existing root needs no hook edit. Node 24 must
+      # be on PATH; the JavaScript suite already requires it.
+      - id: contract-fences-current
+        name: generated contract fences are current (regenerate with scripts/generate_contract_requirements.py)
+        entry: python3 scripts/generate_contract_requirements.py --check
+        language: system
+        files: ^(agents|skills/code-gauntlet|scripts|workflows)/
+        pass_filenames: false
+
+      - id: zizmor
+        name: audit GitHub Actions workflows with zizmor
+        entry: zizmor
+        language: python
+        additional_dependencies: ["zizmor==1.28.0"]
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+        args: [".github/workflows"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: ruff-check
+        # Report-only: a rewriting linter can change semantics; format is the only auto-writer.
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.3.0
+    hooks:
+      - id: mypy
+        pass_filenames: false
+        args: ["--config-file", "pyproject.toml"]
+        additional_dependencies: ["pytest==9.1.1"]

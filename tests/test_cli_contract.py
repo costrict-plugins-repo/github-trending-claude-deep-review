@@ -1,0 +1,1608 @@
+"""Parent-recorded stdout bytes and exit codes for every script entry."""
+
+import importlib
+import io
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from gauntlet import cli, marker, patches, prior_review, proc
+from gauntlet.forge import GitHub, JsonFetch, PostResult
+from gauntlet.paths import ENTRY_ROOT
+
+from tests.conftest import Invocation
+from tests.support import path_text
+from tests.support import posting as posting_cases
+from tests.support.delivery import admitted_stamp
+from tests.support.forge import FakeForge, FakeGitLab, ForgeCall
+
+ROOT = Path(__file__).resolve().parents[1]
+RECORDED = json.loads(
+    (Path(__file__).with_name("fixtures") / "cli_contract.json").read_text(
+        encoding="utf-8"
+    )
+)
+SHA = "abc1234"
+FULL = "a" * 40
+
+
+def _scenario_param(case, *values):
+    return pytest.param(case, *values, id=case)
+
+
+@pytest.mark.usefixtures("poster_state")
+@pytest.mark.parametrize(
+    "mode,flag,dry_run,platform,spelling",
+    [
+        pytest.param(None, False, False, "github", "absolute", id="default-live"),
+        pytest.param("live", False, False, "github", "absolute", id="env-live"),
+        pytest.param("dry-run", False, True, "github", "absolute", id="env-dry-run"),
+        pytest.param(None, True, True, "github", "absolute", id="flag-dry-run"),
+        pytest.param(
+            "live", True, True, "github", "absolute", id="flag-beats-env-live"
+        ),
+        pytest.param(None, True, True, "gitlab", "relative", id="relative-artifact"),
+        pytest.param(None, True, True, "gitlab", "symlink", id="symlink-artifact"),
+    ],
+)
+def test_poster_mode_stdout(
+    mode,
+    flag,
+    dry_run,
+    platform,
+    spelling,
+    tmp_path,
+    invoke,
+    forge_factory,
+    monkeypatch,
+    request,
+):
+    data = {
+        **POST,
+        "platform": platform,
+        "review_body": "Summary",
+        "findings": [
+            {
+                "file": "foo.py",
+                "line": 2,
+                "severity": "high",
+                "line_start": 2,
+                "line_end": 2,
+                "location_status": "confirmed",
+                "admission": admitted_stamp(),
+                "disposition": "deliver",
+                "anchor": "original_source_value()",
+                "title": "Bug A",
+                "body": "Body A",
+            }
+        ],
+    }
+    directory = tmp_path / "caf\u00e9 inputs"
+    directory.mkdir()
+    path = directory / "findings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    artifact = directory / "post-review-payload.json"
+    source_directory = directory
+    if spelling == "symlink":
+        request.getfixturevalue("symlink_or_skip")
+        directory = tmp_path / "alias inputs"
+        directory.mkdir()
+        alias = directory / "findings.json"
+        alias.symlink_to(path)
+        path = alias
+        artifact = directory / "post-review-payload.json"
+    input_path = (
+        os.path.join("caf\u00e9 inputs", "findings.json")
+        if spelling == "relative"
+        else str(path)
+    )
+    raw_diff = (
+        "--- foo.py\n+++ foo.py\n@@ -1,1 +1,2 @@\n context\n+original_source_value()\n"
+    )
+    fake = forge_factory.configure(
+        FakeForge(diffs=[(raw_diff, "", 0)])
+        if platform == "github"
+        else _gitlab_fake(raw_diff)
+    )
+    if mode is None:
+        monkeypatch.delenv("CODE_GAUNTLET_POST_MODE", raising=False)
+    else:
+        monkeypatch.setenv("CODE_GAUNTLET_POST_MODE", mode)
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("Unexpected Git call"))
+    result = invoke(
+        "post_review", [input_path] + (["--dry-run"] if flag else []), tmp_path
+    )
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert forge_factory.calls == [(platform, None)]
+    writes = [call for call in fake.calls if call.method == "submit"]
+    if dry_run:
+        assert writes == []
+        payload = json.loads(artifact.read_bytes())
+        assert payload["platform"] == platform
+        assert result.stdout == (
+            (
+                "Review captured (dry-run).\n  1 inline comment(s) captured.\n"
+                if platform == "github"
+                else "MR summary note captured (dry-run).\n  1 inline "
+                "discussion(s) captured.\n"
+            )
+            + "Dry run \u2014 no comments posted. Payload written to: "
+            + str(artifact)
+            + "\n"
+        ).encode("utf-8")
+        if platform == "github":
+            assert payload["payload"]["comments"][0]["line"] == 2
+        else:
+            assert payload["discussions"][0]["position"]["new_line"] == 2
+    else:
+        assert len(writes) == 1
+        assert writes[0].request.endpoint == "repos/o/r/pulls/5/reviews"
+        assert writes[0].request.payload["event"] == "COMMENT"
+        assert writes[0].request.payload["comments"][0]["line"] == 2
+        assert not artifact.exists()
+        assert b"Review posted:" in result.stdout
+        assert b"inline comment(s) posted." in result.stdout
+        assert b"captured" not in result.stdout
+    if spelling == "symlink":
+        assert not (source_directory / "post-review-payload.json").exists()
+    assert fake.calls[0] == ForgeCall("diff", fake.calls[0].target)
+
+
+def _git_result(command, **kwargs):
+    assert command[0] == "git"
+    if command[1] == "rev-parse":
+        return proc.CompletedProcess(
+            command, 0, ("b" * 40 if command[-1] == "HEAD" else command[-1]) + "\n", ""
+        )
+    if command[1:3] in (["cat-file", "-e"], ["merge-base", "--is-ancestor"]):
+        return proc.CompletedProcess(command, 0, "", "")
+    if command[1:3] == ["rev-list", "--count"]:
+        return proc.CompletedProcess(command, 0, "3\n", "")
+    raise AssertionError(f"Unexpected Git call: {command}")
+
+
+@pytest.mark.parametrize("case", ["offline", "unicode-marker", "unicode-read-error"])
+def test_detector_receipt(case, tmp_path, invoke, monkeypatch):
+    path = tmp_path / "caf\u00e9-missing.json"
+    version = "3.0 caf\u00e9 \U0001f41b"
+    unknown_key = "future_\u00e9"
+    payload = {
+        "version": version,
+        "findings_count": 1,
+        "sha": FULL,
+        unknown_key: "ignored",
+    }
+    body = (
+        f"<!-- {marker.MARKER_TOKEN}: {json.dumps(payload)} -->"
+        if case == "unicode-marker"
+        else marker.build_marker(FULL, 1)
+    )
+    if case != "unicode-read-error":
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "body": body,
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "source": "review",
+                        "id": 101,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(proc, "run", _git_result)
+    result = invoke(
+        "detect_prior_review",
+        ["--platform", "github", "--bodies-file", str(path)],
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert result.stdout.isascii()
+    assert result.stdout.endswith(b"\n")
+    text = result.stdout.decode().strip()
+    receipt, end = json.JSONDecoder().raw_decode(text)
+    assert isinstance(receipt, dict)
+    assert end == len(text)
+    if case == "unicode-read-error":
+        assert receipt["previously_reviewed"] is False
+        assert receipt["errors"]
+    else:
+        assert receipt["previously_reviewed"] is True
+        if case == "unicode-marker":
+            assert receipt["marker"]["version"] == version
+            assert receipt["marker"]["unknown_keys"] == [unknown_key]
+
+
+@pytest.mark.parametrize(
+    "argv, code, error",
+    [
+        pytest.param(
+            ["--owner", "o", "--repo", "r", "--number", "5"],
+            2,
+            "the following arguments are required: --platform",
+            id="missing-platform",
+        ),
+        pytest.param(["--platform", "github"], 0, None, id="missing-number"),
+        pytest.param(
+            ["--platform", "github", "--nope", "wat"],
+            2,
+            "unrecognized arguments: --nope wat",
+            id="unknown-flag",
+        ),
+    ],
+)
+def test_detector_usage(argv, code, error, tmp_path, invoke, monkeypatch):
+    monkeypatch.setattr(proc, "run", _git_result)
+    result = invoke("detect_prior_review", argv, tmp_path)
+    assert result.returncode == code
+    if error is not None:
+        assert result.stdout == b""
+        assert result.stderr == f"detect_prior_review: {error}\n".encode()
+    else:
+        receipt = json.loads(result.stdout)
+        assert receipt["previously_reviewed"] is False
+        assert receipt["errors"] == [
+            "usage: --number is required unless --bodies-file is given"
+        ]
+
+
+def test_identity_unicode_receipt(tmp_path, invoke):
+    result = invoke(
+        "resolve_pr_identity",
+        [
+            "--platform",
+            "github",
+            "--sha",
+            FULL,
+        ],
+        tmp_path,
+        json.dumps(
+            {
+                "url": "https://github.com/OpenAI/codex/pull/278",
+                "title": "A caf\u00e9 fix",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert result.stdout == (
+        b'{"owner": "OpenAI", "repo": "codex", "pr_number": 278, "sha_full": "'
+        + FULL.encode()
+        + b'", "platform": "github", "web_origin": "https://github.com", '
+        b'"title": "A caf\\u00e9 fix"}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "url, sha, error",
+    [
+        pytest.param(
+            "https://gitlab.com/a/r/-/merge_requests/3",
+            FULL,
+            "URL path does not match a github PR URL",
+            id="wrong-platform",
+        ),
+        pytest.param(
+            "https://github.com/a/r/pull/" + "9" * 5000,
+            FULL,
+            "PR/MR number must be a positive safe integer",
+            id="overlong-number",
+        ),
+    ],
+)
+def test_identity_data_error(url, sha, error, tmp_path, invoke):
+    result = invoke(
+        "resolve_pr_identity",
+        ["--platform", "github", "--sha", sha],
+        tmp_path,
+        json.dumps({"url": url}).encode(),
+    )
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == f"resolve_pr_identity: {error}\n".encode()
+
+
+@pytest.mark.parametrize(
+    "name, argv",
+    [
+        pytest.param("detect_prior_review", ["--platform", "github"], id="detector"),
+        pytest.param(
+            "resolve_pr_identity",
+            [
+                "--platform",
+                "github",
+                "--sha",
+                FULL,
+            ],
+            id="identity",
+        ),
+    ],
+)
+def test_converted_serialization_fallback(
+    name: str,
+    argv: list[str],
+    tmp_path: Path,
+    invoke: Callable[[str, list[str], Path, bytes], Invocation],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> str:
+        raise TypeError("injected serialization failure")
+
+    monkeypatch.setattr(proc, "run", _git_result)
+    monkeypatch.setattr(cli, "dumps", fail)
+    result = invoke(name, argv, tmp_path, b'{"url":"https://github.com/o/r/pull/5"}')
+    assert result.returncode == 1
+    assert (
+        result.stdout == b'{"ok": false, "errors": ["receipt serialization failed"]}\n'
+    )
+    assert result.stderr == b""
+
+
+def test_detector_real_child_degradation(tmp_path, invoke, monkeypatch):
+    real_run = proc.run
+    calls = []
+    child = r"import sys; sys.stdout.buffer.write(b'\xff\xfe' + b'not json')"
+
+    def child_run(command, **kwargs):
+        if command[0] == "git":
+            return _git_result(command, **kwargs)
+        calls.append((command, kwargs))
+        return real_run([sys.executable, "-c", child], **kwargs)
+
+    monkeypatch.setattr(proc, "run", child_run)
+    monkeypatch.setattr(
+        prior_review, "make_forge", lambda platform, host=None: GitHub(host=host)
+    )
+    result = invoke(
+        "detect_prior_review",
+        ["--platform", "github", "--owner", "o", "--repo", "r", "--number", "5"],
+        tmp_path,
+    )
+    obj, end = json.JSONDecoder().raw_decode(result.stdout.decode().strip())
+    assert result.returncode == 0
+    assert end == len(result.stdout.decode().strip())
+    assert obj["previously_reviewed"] is False
+    assert obj["errors"] == [
+        "github reviews: response was not JSON: \ufffd\ufffdnot json",
+        (
+            "could not resolve posting identity (github /user: response was not JSON: "
+            "\ufffd\ufffdnot json); set CODE_GAUNTLET_POSTER "
+            "to the account used to post reviews"
+        ),
+    ]
+    assert calls == [
+        (
+            ["gh", "api", "--paginate", "repos/o/r/pulls/5/reviews"],
+            {"cwd": None, "timeout": 30, "errors": "replace"},
+        ),
+        (
+            ["gh", "api", "user"],
+            {"cwd": None, "timeout": 30, "errors": "replace"},
+        ),
+    ]
+
+
+PATCH = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+# argv strings split on spaces before placeholders expand, so paths may hold spaces.
+MAIN_FAILURE = {
+    "capture_policy_env": "",
+    "check_eligibility": "--platform github --pr 7",
+    "list_pr_files": "--platform github --pr 7",
+    "pr_status": "--platform github --pr 7",
+    "save_git_diff": "--git-range HEAD --output {missing}",
+    "assemble_artifacts": "--plan {missing}",
+    "await_workflow": "{missing} --timeout-seconds 0 --since-epoch 0 --max-attempts 1",
+    "build_style_artifacts": "--repo-root {missing} --check",
+    "collect_project_rules": "--repo-root {missing} --out {missing}",
+    "detect_prior_review": "--platform github --bodies-file {missing}",
+    "diff_numstat": "{missing}",
+    "emit_style_context": "",
+    "ensure_output_dir": "--cwd {missing}",
+    "generate_contract_requirements": "--repo-root {missing} --check",
+    "incremental_diff": f"--files {{missing}} --since {FULL}",
+    "materialize_artifacts": "--output-dir {missing} --task {missing}",
+    "post_review": "{missing}",
+    "render_fix_tasks": "{missing} --repo-root {missing}",
+    "report_patches": "--output-dir {missing} --head-sha abcd",
+    "resolve_branch": "",
+    "resolve_config": "--target local --cwd {missing}",
+    "resolve_pr_identity": f"--platform github --sha {FULL}",
+    "stale_truncate": "--output-dir {missing} --head-sha abcd",
+    "verify_findings": "--target-kind branch --input {missing} --output {missing}",
+    "write_shared_context": "--output-dir {missing} --head-sha abcd",
+}
+# diff_numstat, emit_style_context and ensure_output_dir have no malformed-input
+# branch beyond the failure row.
+BAD_INPUT = {
+    "check_eligibility": "--platform github --pr 7",
+    "list_pr_files": "--platform github --pr 0",
+    "pr_status": "--platform github --pr 0",
+    "save_git_diff": "--git-range HEAD~1 --output {missing}",
+    "assemble_artifacts": "--plan {invalid}",
+    "await_workflow": "{missing} --attempt invalid",
+    "build_style_artifacts": "--repo-root {invalid} --check",
+    "collect_project_rules": "--repo-root {invalid} --out {missing}",
+    "detect_prior_review": "--platform bitbucket",
+    "generate_contract_requirements": "--repo-root {invalid} --check",
+    "incremental_diff": f"--files {{invalid}} --since {FULL}",
+    "materialize_artifacts": "--output-dir {missing}",
+    "post_review": "--platform bitbucket",
+    "render_fix_tasks": "{invalid} --repo-root {root}",
+    "report_patches": "--output-dir {missing} --head-sha invalid",
+    "resolve_branch": "",
+    "resolve_config": "--target bitbucket",
+    "resolve_pr_identity": "--platform bitbucket",
+    "stale_truncate": "--output-dir {missing} --head-sha invalid",
+    "verify_findings": "--target-kind branch --input {invalid} --output {missing}",
+    "write_shared_context": "--output-dir {missing} --head-sha invalid",
+}
+POST = {"platform": "github", "owner": "o", "repo": "r", "pr_number": 5, "sha": FULL}
+# Each success row is (files written under the case directory, argv).
+SUCCESS = {
+    "capture_policy_env": ({}, ""),
+    "check_eligibility": ({}, "--platform github --pr 7"),
+    "list_pr_files": ({}, "--platform github --pr 7"),
+    "pr_status": ({}, "--platform github --pr 7"),
+    "save_git_diff": ({}, "--git-range HEAD --output {dir}/patch"),
+    "build_style_artifacts": ({}, "--repo-root {root} --check"),
+    "collect_project_rules": ({}, "--repo-root {dir} --out {dir}/rules.md"),
+    "detect_prior_review": (
+        {"bodies.json": "[]"},
+        f"--platform github --pr-url https://git.example.com/o/r/pull/5 --bodies-file {{dir}}/bodies.json --head-sha {FULL}",
+    ),
+    "diff_numstat": ({"change.patch": PATCH}, "{dir}/change.patch"),
+    "emit_style_context": ({}, ""),
+    "ensure_output_dir": ({}, "--cwd {root}"),
+    "generate_contract_requirements": ({}, "--repo-root {root} --check"),
+    "incremental_diff": (
+        {"files.json": "[]"},
+        f"--files {{dir}}/files.json --since {FULL}",
+    ),
+    "post_review": (
+        {
+            "post.json": json.dumps(
+                {**POST, "web_origin": "https://git.example.com", "findings": []}
+            )
+        },
+        "{dir}/post.json --web-origin https://override.example --dry-run",
+    ),
+    "render_fix_tasks": ({"p.json": "[]"}, "{dir}/p.json --repo-root {dir}"),
+    "report_patches": (
+        {
+            f"code-gauntlet-findings-{SHA}.json": "[]",
+            f"code-gauntlet-diff-{SHA}.patch": PATCH,
+        },
+        f"--output-dir {{dir}} --head-sha {SHA}",
+    ),
+    "resolve_branch": ({}, ""),
+    "resolve_config": ({}, "--target local --cwd {root} --plugin-root {root}"),
+    "resolve_pr_identity": (
+        {},
+        f"--platform github --sha {FULL}",
+    ),
+    "stale_truncate": (
+        {f"code-gauntlet-report-{SHA}.md": "stale"},
+        f"--output-dir {{dir}} --head-sha {SHA} --unconditional",
+    ),
+    "verify_findings": (
+        {"diff.patch": PATCH},
+        '--target-kind branch --input {dir}/slice.json --input-inline {{"findings":[],'
+        '"base_branch":"main"}} '
+        "--diff-file {dir}/diff.patch --head-sha abcd --nonce cli",
+    ),
+    "write_shared_context": (
+        {
+            f"code-gauntlet-project-rules-{SHA}.md": "rules\n",
+            f"code-gauntlet-diff-{SHA}.patch": "diff\n",
+        },
+        f"--output-dir {{dir}} --head-sha {SHA} --repo-root {{dir}}",
+    ),
+}
+AWAIT = "--timeout-seconds 0 --since-epoch 0 --max-attempts 2"
+REQUIRED_ONLY = {
+    "diff_numstat": "",
+    "materialize_artifacts": "--output-dir {dir}",
+    "stale_truncate": "--output-dir {dir}",
+}
+WINDOWS_PATHS = "the parent POSIX path receipts cannot be compared with Windows paths"
+WINDOWS_EXCEPTIONS = {
+    ("emit_style_context", "failure"): "chmod 0 does not deny reads on Windows",
+    (
+        "write_shared_context",
+        "success",
+    ): "the parent write_text input uses CRLF on Windows",
+}
+
+
+def _captured_policy_key(key):
+    return key.startswith(("CLAUDE_CODE_USE_", "ANTHROPIC_DEFAULT_")) or key in (
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "ANTHROPIC_BASE_URL",
+    )
+
+
+def _windows_skip(name, case, *, platform=None):
+    if (os.name if platform is None else platform) != "nt":
+        return None
+    if (name, case) in WINDOWS_EXCEPTIONS:
+        return WINDOWS_EXCEPTIONS[name, case]
+    recorded_stdout = RECORDED[f"{name}/{case}"][1]
+    if "<TMP>" in recorded_stdout or "<ROOT>" in recorded_stdout:
+        return WINDOWS_PATHS
+    return None
+
+
+@pytest.mark.parametrize(
+    ("name", "case"),
+    (
+        ("build_style_artifacts", "success"),
+        ("emit_style_context", "success"),
+        ("generate_contract_requirements", "success"),
+        ("detect_prior_review", "bad_input"),
+    ),
+)
+def test_windows_keeps_path_free_contract_rows(name, case):
+    assert _windows_skip(name, case, platform="nt") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "case"),
+    (
+        ("emit_style_context", "failure"),
+        ("write_shared_context", "success"),
+        ("await_workflow", "pending"),
+    ),
+)
+def test_windows_skips_only_named_exceptions_or_path_receipts(name, case):
+    assert _windows_skip(name, case, platform="nt")
+
+
+def _built_success(name, directory):
+    if name == "assemble_artifacts":
+        from tests.support.artifacts import _Workspace
+
+        workspace = _Workspace()
+        with patch("tempfile.mkdtemp", return_value=str(directory)):
+            workspace.__enter__()
+        return ["--plan", workspace.write_plan(workspace.plan())]
+    if name == "await_workflow":
+        from tests.support.artifacts import SUCCESS_RETURN, envelope
+
+        task = directory / "task.output"
+        task.write_text(json.dumps(envelope(SUCCESS_RETURN)), encoding="utf-8")
+        return [str(task), "--timeout-seconds", "0"]
+    from tests.support.artifacts import record_task_output
+
+    task, output = record_task_output(str(directory))
+    return ["--output-dir", output, "--task", task]
+
+
+def _command_line(name, case, directory):
+    if case == "success":
+        files, command_line = SUCCESS[name]
+        for relative, text in files.items():
+            (directory / relative).write_text(text, encoding="utf-8")
+        return command_line
+    if case == "artifacts_only":
+        from gauntlet.registry import ARTIFACT_BASENAMES
+
+        for template in ARTIFACT_BASENAMES:
+            (directory / template.format(sha="abc12345")).write_text(
+                "x", encoding="utf-8"
+            )
+        return (
+            f"wnosuchtask000 {AWAIT} --artifacts-dir {{dir}} "
+            "--head-sha abc12345 --artifacts-grace-seconds 0"
+        )
+    return {
+        "help": "--help",
+        "usage": "--unknown",
+        "failure": MAIN_FAILURE.get(name),
+        "bad_input": BAD_INPUT.get(name),
+        "required_only": REQUIRED_ONLY.get(name),
+        "pending": f"{{dir}}/pending.output {AWAIT}",
+    }[case]
+
+
+def scenario(name, case, tmp_path, *, shell_fixture=False):
+    directory = tmp_path / name / case
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "invalid.json").write_text("not json", encoding="utf-8")
+    fake_bin = directory / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    if shell_fixture and name == "post_review":
+        (fake_bin / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (fake_bin / "gh").chmod(0o755)
+    if case == "success" and name not in SUCCESS:
+        argv = _built_success(name, directory)
+    else:
+        places = {"dir": directory, "root": ROOT, "missing": directory / "missing"}
+        places["invalid"] = directory / "invalid.json"
+        argv = [
+            arg.format(**places) for arg in _command_line(name, case, directory).split()
+        ]
+    triage = (name, case) == ("write_shared_context", "success")
+    stdin = b"triage\n" if triage else b"{}\n"
+    if (name, case) == ("resolve_pr_identity", "success"):
+        stdin = b'{"url":"https://github.com/o/r/pull/5"}\n'
+    if name in ("check_eligibility", "list_pr_files", "pr_status"):
+        stdin = b'{"mode":"interactive","resolved":{}}\n'
+        if case == "bad_input":
+            stdin = b"[]\n"
+        if shell_fixture:
+            (fake_bin / "gh").write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = pr ]; then\n'
+                '  printf \'%s\\n\' \'{"state":"OPEN","isDraft":false,'
+                '"url":"https://github.com/upstream/project/pull/7",'
+                '"headRefOid":"' + FULL + "\"}'\n"
+                "else\n  printf '\"src/code\"\\n'\nfi\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "gh").chmod(0o755)
+    if name == "save_git_diff" and case == "success":
+        from tests.support.git_diff import patch_repo
+
+        with pytest.MonkeyPatch.context() as patcher:
+            patch_repo(directory, patcher)
+    if name == "resolve_branch":
+        stdin = b"one\ntwo\n" if case == "bad_input" else b"unknown-ref\n"
+        if case == "success":
+            subprocess.run(
+                ["git", "init", "-q", "--object-format=sha1"],
+                cwd=directory,
+                capture_output=True,
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin"],
+                input=(
+                    b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+                    b"author test <test@example.invalid> 0 +0000\n"
+                    b"committer test <test@example.invalid> 0 +0000\n\ntip\n"
+                ),
+                cwd=directory,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "update-ref", "refs/heads/tip", commit],
+                cwd=directory,
+                capture_output=True,
+                check=True,
+            )
+            stdin = b"tip\n"
+    return directory, argv, stdin, fake_bin
+
+
+def normalize(data, tmp_path, root=ROOT):
+    text = data.decode("utf-8", errors="surrogateescape")
+    carrier = (ROOT / "docs/style/session-context.md").read_text(encoding="utf-8")
+    text = text.replace(json.dumps(carrier.partition("\n\n")[2])[1:-1], "<CARRIER>")
+    paths = {
+        os.path.realpath(tmp_path): "<TMP>",
+        str(tmp_path): "<TMP>",
+        os.path.realpath(root): "<ROOT>",
+        str(root): "<ROOT>",
+        ENTRY_ROOT: "<ROOT>",
+        str(Path(__file__).absolute().parents[1]): "<ROOT>",
+    }
+    for source, replacement in sorted(
+        paths.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        text = path_text.normalize_path_text(text, source, replacement)
+    for pattern, replacement in (
+        (
+            r'(pipeline_version=|"pipeline_version"\s*:\s*")3\.\d+\.\d+',
+            r"\1<BUNDLE_VERSION>",
+        ),
+        (r"fnv1a32:0x[0-9a-f]{8}", "<CHECKSUM>"),
+        (r'("(?:expected_)?chars"\s*:\s*)\d+', r"\1<CHARS>"),
+        (r'("waited_seconds"\s*:\s*)[0-9.]+', r"\1<ELAPSED>"),
+        (r'("searched"\s*:\s*)\[[^\n]*(?=,"gap")', r"\1<SEARCH_ROOTS>"),
+        (r"'(<(?:TMP|ROOT)>[^']*)'", r"\1"),
+    ):
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
+@pytest.mark.parametrize(
+    ("text", "directory", "expected", "separator"),
+    [
+        pytest.param(
+            r"failed at C:\build\tests\case\report.json",
+            r"C:\build\tests\case",
+            "failed at <OUT>/report.json",
+            "\\",
+            id="windows-plain",
+        ),
+        pytest.param(
+            r"failed at C:\\build\\tests\\case\\report.json",
+            r"C:\build\tests\case",
+            "failed at <OUT>/report.json",
+            "\\",
+            id="windows-json-escaped",
+        ),
+        pytest.param(
+            r"OSError: missing 'C:\\\\build\\\\tests\\\\case\\\\findings.json'",
+            "C:/build/tests/case",
+            "OSError: missing '<OUT>/findings.json'",
+            "\\",
+            id="windows-nested-error-path",
+        ),
+        pytest.param(
+            r"error at C:\build\tests\case",
+            r"C:\build\tests\case",
+            "error at <OUT>",
+            "\\",
+            id="windows-path-at-end",
+        ),
+        pytest.param(
+            "/tmp/pytest/case/report.json",
+            "/tmp/pytest/case",
+            "<OUT>/report.json",
+            "/",
+            id="posix-path",
+        ),
+    ],
+)
+def test_normalize_temp_path_encodings(
+    text, directory, expected, separator, monkeypatch
+):
+    monkeypatch.setattr(path_text.os, "sep", separator)
+    assert path_text.normalize_path_text(text, directory, "<OUT>") == expected
+
+
+@pytest.mark.parametrize("suffix", ("-link", " space[1]"))
+def test_normalize_path_boundaries_and_shell_quotes(tmp_path, suffix):
+    root = tmp_path / f"checkout{suffix}"
+    data = f"python3 '{root}/scripts/await_workflow.py' {root}x".encode()
+    assert normalize(data, tmp_path, root) == (
+        f"python3 <ROOT>/scripts/await_workflow.py <TMP>/checkout{suffix}x"
+    )
+
+
+@pytest.mark.parametrize("kind", ("symlink", "space"))
+def test_pending_receipt_normalizes_noncanonical_root(
+    kind, tmp_path, invoke, monkeypatch, request
+):
+    from gauntlet import paths
+
+    alias = tmp_path / ("plugin-link" if kind == "symlink" else "plugin space[1]")
+    if kind == "symlink":
+        request.getfixturevalue("symlink_or_skip")
+        alias.symlink_to(ROOT, target_is_directory=True)
+    else:
+        alias.mkdir()
+    monkeypatch.setattr(paths, "ENTRY_ROOT", str(alias))
+    directory, argv, stdin, _ = scenario("await_workflow", "pending", tmp_path)
+    result = invoke("await_workflow", argv, directory, stdin)
+    assert result.returncode == 3
+    if os.name == "nt":
+        marker = json.loads(result.stdout)
+        assert (
+            shlex.split(marker["next_command"])[1]
+            == (alias / "scripts" / "await_workflow.py").as_posix()
+        )
+    else:
+        assert (
+            normalize(result.stdout, tmp_path, alias)
+            == RECORDED["await_workflow/pending"][1]
+        )
+
+
+def rows():
+    for name in MAIN_FAILURE:
+        yield from ((name, case) for case in ("success", "usage", "failure"))
+        if name in BAD_INPUT:
+            yield name, "bad_input"
+    yield from (
+        (name, "help")
+        for name in (
+            "diff_numstat",
+            "incremental_diff",
+            "stale_truncate",
+            "write_shared_context",
+            "report_patches",
+            "resolve_branch",
+            "resolve_pr_identity",
+            "check_eligibility",
+            "list_pr_files",
+            "pr_status",
+            "save_git_diff",
+            "detect_prior_review",
+            "post_review",
+        )
+    )
+    yield "await_workflow", "pending"
+    yield "await_workflow", "artifacts_only"
+    yield from ((name, "required_only") for name in REQUIRED_ONLY)
+
+
+def _assert_recorded(name, case, returncode, stdout, tmp_path):
+    code, expected = RECORDED[f"{name}/{case}"]
+    assert (returncode, normalize(stdout, tmp_path)) == (code, expected)
+
+
+@pytest.mark.parametrize(("name", "case"), list(rows()))
+def test_recorded_cli(name, case, tmp_path, invoke, monkeypatch, forge_factory):
+    forge_factory.configure(FakeForge(diffs=[("", "", 0)]))
+    if reason := _windows_skip(name, case):
+        pytest.skip(reason)
+    monkeypatch.setenv("COLUMNS", "100")
+    directory, argv, stdin, fake_bin = scenario(name, case, tmp_path)
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("CODE_GAUNTLET_OUTPUT_DIR", str(directory / "output"))
+    if name == "capture_policy_env":
+        for key in list(os.environ):
+            if _captured_policy_key(key):
+                monkeypatch.delenv(key)
+    if name == "emit_style_context" and case == "failure":
+        carrier = directory / "unreadable-carrier"
+        carrier.write_text("x", encoding="utf-8")
+        carrier.chmod(0)
+        module = importlib.import_module("gauntlet.style_hook")
+        monkeypatch.setattr(module, "CARRIER", str(carrier))
+    if name in ("check_eligibility", "list_pr_files", "pr_status"):
+
+        def eligibility_output(command, **kwargs):
+            if command == [
+                "gh",
+                "pr",
+                "view",
+                "7",
+                "--json",
+                "state,isDraft,url,headRefOid",
+            ]:
+                if case == "failure":
+                    return "", "forbidden", 1
+                return (
+                    json.dumps(
+                        {
+                            "state": "OPEN",
+                            "isDraft": False,
+                            "url": "https://github.com/upstream/project/pull/7",
+                            "headRefOid": FULL,
+                        }
+                    ),
+                    "",
+                    0,
+                )
+            assert command == [
+                "gh",
+                "api",
+                "--hostname",
+                "github.com",
+                "repos/upstream/project/pulls/7/files?per_page=100",
+                "--paginate",
+                "--jq",
+                ".[].filename | @json",
+            ]
+            return '"src/code"\n', "", 0
+
+        monkeypatch.setattr(proc, "output", eligibility_output)
+    result = invoke(name, argv, directory, stdin)
+    _assert_recorded(name, case, result.returncode, result.stdout, tmp_path)
+    if (name, case) == ("post_review", "failure"):
+        assert (
+            result.stderr
+            == posting_cases.ERRORS["missing-findings"].format(path=argv[0]).encode()
+        )
+    if result.returncode and not result.stdout:
+        assert re.fullmatch(rf"{name}: [^\n]+\n", result.stderr.decode())
+
+
+def test_recording_covers_all_entry_files():
+    assert set(MAIN_FAILURE) == {path.stem for path in (ROOT / "scripts").glob("*.py")}
+    assert set(BAD_INPUT) | set(SUCCESS) <= set(MAIN_FAILURE)
+    assert sorted(f"{name}/{case}" for name, case in rows()) == sorted(RECORDED)
+
+
+@pytest.mark.parametrize("name", MAIN_FAILURE)
+def test_entry_runs_from_foreign_cwd(name, tmp_path):
+    if reason := _windows_skip(name, "success"):
+        pytest.skip(reason)
+    if os.name == "nt" and name in ("check_eligibility", "list_pr_files", "pr_status"):
+        pytest.skip("the fake forge CLIs on PATH are shebang scripts")
+    directory, argv, stdin, fake_bin = scenario(
+        name, "success", tmp_path, shell_fixture=True
+    )
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    if name == "capture_policy_env":
+        env = {
+            key: value for key, value in env.items() if not _captured_policy_key(key)
+        }
+    env.update(
+        PYTHONSAFEPATH="1",
+        PYTHONIOENCODING="latin-1",
+        CODE_GAUNTLET_OUTPUT_DIR=str(directory / "output"),
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / f"{name}.py"), *argv],
+        cwd=directory,
+        input=stdin,
+        env=env,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    _assert_recorded(name, "success", result.returncode, result.stdout, tmp_path)
+
+
+def _gitlab_fake(raw_diff="", *, refs=None, submissions=None) -> FakeGitLab:
+    return FakeGitLab(
+        diffs=[(raw_diff, "", 0)],
+        submissions=submissions,
+        refs=refs
+        if refs is not None
+        else [
+            JsonFetch(
+                [
+                    {
+                        "base_commit_sha": "base",
+                        "head_commit_sha": "head",
+                        "start_commit_sha": "start",
+                    }
+                ],
+                None,
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "remote, status, expected",
+    [
+        pytest.param(
+            "git@github.com:o/r.git", 0, ("github", "github.com"), id="github-scp"
+        ),
+        pytest.param(
+            "https://gitlab.com/g/r.git", 0, ("gitlab", "gitlab.com"), id="gitlab-https"
+        ),
+        pytest.param(
+            "https://code.example.org/g/r.git",
+            0,
+            (None, "code.example.org"),
+            id="private-code",
+        ),
+        pytest.param("", 1, (None, None), id="remote-nonzero"),
+    ],
+)
+def test_poster_auto_detection(
+    remote, status, expected, tmp_path, invoke, forge_factory, monkeypatch
+):
+    data: dict[str, object] = {
+        "owner": "o",
+        "repo": "r",
+        "pr_number": 5,
+        "sha": FULL,
+        "findings": [],
+    }
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    platform, host = expected
+    fake = FakeForge(diffs=[("", "", 0)]) if platform == "github" else _gitlab_fake()
+    forge_factory.configure(fake)
+    origins: list[list[str]] = []
+
+    def run(command, **kwargs):
+        assert command == ["git", "remote", "get-url", "origin"]
+        assert kwargs == {"cwd": None, "timeout": None, "errors": "strict"}
+        origins.append(command)
+        return proc.CompletedProcess(command, status, remote, "")
+
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.delenv("CODE_GAUNTLET_POST_MODE", raising=False)
+    result = invoke("post_review", [str(path), "--dry-run"], tmp_path)
+    assert origins == [["git", "remote", "get-url", "origin"]]
+    artifact = tmp_path / "post-review-payload.json"
+    if platform:
+        assert result.returncode == 0
+        assert result.stderr == b""
+        assert result.stdout.startswith(
+            f"Detected platform: {platform} (from git remote: {host})\n".encode()
+        )
+        assert forge_factory.calls == [(platform, None)]
+        assert json.loads(artifact.read_text(encoding="utf-8"))["platform"] == platform
+        assert all(call.method != "submit" for call in fake.calls)
+        assert len([call for call in fake.calls if call.method == "diff"]) == 1
+    else:
+        assert result.returncode == 1
+        assert result.stdout == b""
+        assert result.stderr == (
+            b"post_review: Could not detect platform from git remote. "
+            b"Set 'platform' field in findings JSON to 'github' or 'gitlab'.\n"
+        )
+        assert forge_factory.calls == []
+        assert fake.calls == []
+        assert not artifact.exists()
+
+
+@pytest.mark.parametrize(
+    "payload_platform, override, selected, origin_reads, error",
+    [
+        pytest.param("gitlab", "github", "github", 0, None, id="cli-beats-payload"),
+        pytest.param("github", None, "github", 0, None, id="payload-github"),
+        pytest.param("gitlab", None, "gitlab", 0, None, id="payload-gitlab"),
+        pytest.param("BitBucket", None, None, 0, "bitbucket", id="invalid-payload"),
+        pytest.param("github", "BiTBucket", None, 0, "bitbucket", id="invalid-cli"),
+        pytest.param(None, None, None, 1, "unknown", id="null-payload"),
+    ],
+)
+def test_explicit_platform(
+    payload_platform,
+    override,
+    selected,
+    origin_reads,
+    error,
+    tmp_path,
+    invoke,
+    forge_factory,
+    monkeypatch,
+):
+    data: dict[str, object] = {
+        "owner": "o",
+        "repo": "r",
+        "pr_number": 5,
+        "sha": FULL,
+        "findings": [],
+        "platform": payload_platform,
+    }
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    github = forge_factory.configure(FakeForge(diffs=[("", "", 0)]))
+    gitlab = forge_factory.configure(_gitlab_fake())
+    origins: list[list[str]] = []
+
+    def run(command, **kwargs):
+        assert command == ["git", "remote", "get-url", "origin"]
+        origins.append(command)
+        return proc.CompletedProcess(
+            command, 0, "git@gitlab.internal.company.com:o/r", ""
+        )
+
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setenv("GH_HOST", "github.com")
+    monkeypatch.setenv("GITLAB_HOST", "gitlab.com")
+    result = invoke(
+        "post_review",
+        [str(path), "--dry-run"]
+        + (["--platform", override] if override is not None else []),
+        tmp_path,
+    )
+    assert len(origins) == origin_reads
+    assert forge_factory.calls == ([(selected, None)] if selected else [])
+    if selected:
+        assert result.returncode == 0
+        assert result.stderr == b""
+        assert b"Detected platform:" not in result.stdout
+        assert (
+            json.loads(
+                (tmp_path / "post-review-payload.json").read_text(encoding="utf-8")
+            )["platform"]
+            == selected
+        )
+        fake = github if selected == "github" else gitlab
+        assert len([call for call in fake.calls if call.method == "diff"]) == 1
+    else:
+        assert result.returncode == 1
+        assert result.stdout == b""
+        if error == "unknown":
+            assert result.stderr == (
+                b"post_review: Could not detect platform from git remote. "
+                b"Set 'platform' field in findings JSON to 'github' or 'gitlab'.\n"
+            )
+        else:
+            assert (
+                result.stderr
+                == (
+                    f"post_review: Unsupported platform: '{error}'. "
+                    "Use 'github' or 'gitlab'.\n"
+                ).encode()
+            )
+        assert github.calls == [] and gitlab.calls == []
+
+
+@pytest.mark.parametrize(
+    "outcome", ["missing-git", "nonutf8", "timeout", "undecodable-input"]
+)
+def test_poster_implicit_origin_exceptions(
+    outcome, tmp_path, forge_factory, monkeypatch
+):
+    from gauntlet.delivery import post
+
+    data: dict[str, object] = {"owner": "o", "repo": "r", "pr_number": 5, "sha": FULL}
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    if outcome == "undecodable-input":
+        path.write_bytes(b"\xff")
+    failures: dict[str, Exception] = {
+        "undecodable-input": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+        "missing-git": FileNotFoundError("missing git"),
+        "nonutf8": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+        "timeout": proc.TimeoutExpired(["git"], None),
+    }
+
+    def run(command, **kwargs):
+        assert command == ["git", "remote", "get-url", "origin"]
+        assert kwargs == {"cwd": None, "timeout": None, "errors": "strict"}
+        raise failures[outcome]
+
+    monkeypatch.setattr(proc, "run", run)
+    with pytest.raises(type(failures[outcome])):
+        post.CLI.invoke([str(path)])
+    assert forge_factory.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure, findings, code",
+    [
+        pytest.param("encoder", "[]", 1, id="encoder-success"),
+        pytest.param("first-write", "[]", 1, id="first-write-success"),
+        pytest.param("encoder", "{}", 1, id="encoder-operational-failure"),
+    ],
+)
+def test_patch_serialization_fallback(
+    failure, findings, code, tmp_path, invoke, monkeypatch
+):
+    (tmp_path / "code-gauntlet-findings-abc1234.json").write_text(
+        findings, encoding="utf-8"
+    )
+    calls = 0
+    original_dumps = cli.dumps
+
+    def dumps(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TypeError("injected encoder failure")
+        return original_dumps(*args, **kwargs)
+
+    class FirstWrite(io.TextIOBase):
+        def write(self, text):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("injected first-write failure")
+            return output.write(text)
+
+    output = sys.stdout
+    if failure == "first-write":
+        monkeypatch.setattr(sys, "stdout", FirstWrite())
+    else:
+        monkeypatch.setattr(cli, "dumps", dumps)
+    result = invoke(
+        "report_patches", ["--output-dir", str(tmp_path), "--head-sha", SHA], tmp_path
+    )
+    assert result.returncode == code
+    assert result.stdout == (
+        b'{"ok": false, "path": null, "oracle": null, "candidates": 0, '
+        b'"kept": 0, "downgraded": 0, "reasons": {}, "filtered_earlier": 0, '
+        b'"findings": 0, "warnings": [], "errors": ["receipt could not be'
+        b' serialized"]}\n'
+    )
+    assert result.stderr == b""
+
+
+@pytest.mark.parametrize(
+    "case, findings, sha, code, stdout, stderr",
+    [
+        _scenario_param(
+            "downgrade",
+            '[{"file":"x.py","line":1,"end_line":1,"suggested_fix_code":"changed"}]',
+            "abc1234",
+            0,
+            '{"ok": true, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "missing", "candidates": 1, "kept": 0, '
+            '"downgraded": 1, "reasons": {"no_diff_oracle": 1}, '
+            '"filtered_earlier": 0, "findings": 1, "warnings": '
+            '["report-patch downgraded: x.py:1 (no_diff_oracle)"], "errors": []}\n',
+            "report_patches: report-patch downgraded: x.py:1 (no_diff_oracle)\n",
+        ),
+        _scenario_param(
+            "invalid-sha",
+            "[]",
+            "bad/sha",
+            2,
+            "",
+            "report_patches: --head-sha must match '^[A-Za-z0-9._-]+$': 'bad/sha'\n",
+        ),
+        _scenario_param(
+            "usage",
+            "[]",
+            "abc1234",
+            2,
+            "",
+            "report_patches: the following arguments are required: "
+            "--output-dir, --head-sha\n",
+        ),
+        pytest.param(
+            "failure",
+            "{}",
+            "abc1234",
+            1,
+            '{"ok": false, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "unattempted", "candidates": 0, "kept": 0, '
+            '"downgraded": 0, "reasons": {}, "filtered_earlier": 0, '
+            '"findings": 0, "warnings": [], "errors": ["findings file <TMP>/'
+            "code-gauntlet-findings-abc1234.json must be a JSON array of findings, "
+            'got dict"]}\n',
+            "",
+            id="pre-oracle-failure",
+        ),
+        pytest.param(
+            "outside-receipt",
+            "[]",
+            "abc1234",
+            1,
+            '{"ok": false, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "ok", "candidates": 0, "kept": 0, "downgraded": '
+            '0, "reasons": {}, "filtered_earlier": 0, "findings": 0, '
+            '"warnings": [], "errors": ["ValueError: oversized hunk"]}\n',
+            "",
+            id="outside-receipt-boundary",
+        ),
+        _scenario_param(
+            "postload-progress",
+            '[{"file":"x.py","line":1,"end_line":1,"suggested_fix_code":"'
+            'changed"},{"suggested_fix_code_removed_by":"filter"},null]',
+            "abc1234",
+            1,
+            '{"ok": false, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "ok", "candidates": 0, "kept": 0, "downgraded": '
+            '0, "reasons": {}, "filtered_earlier": 0, "findings": 3, '
+            '"warnings": [], "errors": ["ValueError: oversized hunk"]}\n',
+            "",
+        ),
+        pytest.param(
+            "before-receipt",
+            "[]",
+            "abc1234",
+            1,
+            '{"ok": false, "path": null, "oracle": "unattempted", '
+            '"candidates": 0, "kept": 0, "downgraded": 0, "reasons": {}, '
+            '"filtered_earlier": 0, "findings": 0, "warnings": [], '
+            '"errors": ["unexpected RuntimeError: injected\\r\\nload"]}\n',
+            "",
+            id="preload-unexpected",
+        ),
+        _scenario_param(
+            "warning-breaks",
+            '[{"file":"x.py\\r\\nspoof","line":1,"end_line":1,'
+            '"suggested_fix_code":"changed"}]',
+            "abc1234",
+            0,
+            '{"ok": true, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "missing", "candidates": 1, "kept": 0, '
+            '"downgraded": 1, "reasons": {"no_diff_oracle": 1}, '
+            '"filtered_earlier": 0, "findings": 1, "warnings": '
+            '["report-patch downgraded: x.py\\r\\nspoof:1 (no_diff_oracle)"], '
+            '"errors": []}\n',
+            "report_patches: report-patch downgraded: x.py spoof:1 (no_diff_oracle)\n",
+        ),
+    ],
+)
+def test_patch_command_boundaries(
+    case, findings, sha, code, stdout, stderr, tmp_path, invoke, monkeypatch
+):
+    if case in ("downgrade", "warning-breaks"):
+        rows = json.loads(findings)
+        for row in rows:
+            row.update(
+                line_start=row["line"],
+                line_end=row["end_line"],
+                location_status="confirmed",
+                disposition="deliver",
+                admission=admitted_stamp(),
+                claimed_line_start=row["line"],
+                claimed_line_end=row["end_line"],
+                anchor="original_source_value()",
+            )
+        findings = json.dumps(rows)
+    (tmp_path / "code-gauntlet-findings-abc1234.json").write_text(
+        findings, encoding="utf-8"
+    )
+    if case in ("outside-receipt", "postload-progress"):
+        (tmp_path / "code-gauntlet-diff-abc1234.patch").write_text(
+            PATCH, encoding="utf-8"
+        )
+
+        def fail(*args, **kwargs):
+            raise ValueError("oversized hunk")
+
+        monkeypatch.setattr(patches, "parse_diff", fail)
+    if case == "before-receipt":
+
+        def fail_load(*args, **kwargs):
+            raise RuntimeError("injected\r\nload")
+
+        monkeypatch.setattr(patches, "read_json", fail_load)
+    argv = [] if case == "usage" else ["--output-dir", str(tmp_path), "--head-sha", sha]
+    result = invoke("report_patches", argv, tmp_path)
+    assert result.returncode == code
+    assert normalize(result.stdout, tmp_path) == stdout
+    assert normalize(result.stderr, tmp_path) == stderr
+
+
+@pytest.mark.usefixtures("poster_state")
+@pytest.mark.parametrize(
+    "case,content,error",
+    [
+        _scenario_param(
+            "missing-summary",
+            "## Findings\n\nOnly findings.\n",
+            "post_review: Report does not contain a rendered Summary section.\n",
+        ),
+        _scenario_param(
+            "missing-following-heading",
+            "## Summary\n\nOnly summary.\n",
+            "post_review: Report does not contain a following code-owned "
+            "heading after Summary.\n",
+        ),
+        _scenario_param("malformed-json", "{", "invalid-json"),
+        _scenario_param(
+            "versions-fetch",
+            "Failed to fetch MR versions (exit 3): denied\nEnsure glab is"
+            " authenticated and the MR IID is correct.",
+            "versions-fetch",
+        ),
+        _scenario_param(
+            "versions-parse",
+            "Could not parse MR versions response: bad json",
+            "versions-parse",
+        ),
+        _scenario_param(
+            "submit",
+            "API call failed (exit 1).\nCommand: glab api --method POST "
+            "projects/o%2Fr/merge_requests/5/notes --input payload.json\n"
+            "stderr: denied",
+            "submit-command",
+        ),
+    ],
+)
+def test_poster_report_shape_boundary(
+    case, content, error, tmp_path, invoke, forge_factory
+):
+    path = tmp_path / "findings.json"
+    argv = [str(path)]
+    data = {
+        **POST,
+        "findings": [],
+        "platform": {
+            "missing-summary": "github",
+            "missing-following-heading": "github",
+            "malformed-json": "gitlab",
+            "versions-fetch": "gitlab",
+            "versions-parse": "gitlab",
+            "submit": "gitlab",
+        }[case],
+    }
+    path.write_text(
+        content if case == "malformed-json" else json.dumps(data), encoding="utf-8"
+    )
+    if case.startswith("missing"):
+        report_path = tmp_path / "report.md"
+        report_path.write_text(content, encoding="utf-8")
+        argv += ["--report", str(report_path)]
+    fake = {
+        "missing-summary": FakeForge(),
+        "missing-following-heading": FakeForge(),
+        "malformed-json": FakeForge(),
+        "versions-fetch": _gitlab_fake(refs=[JsonFetch(None, content)]),
+        "versions-parse": _gitlab_fake(refs=[JsonFetch(None, content)]),
+        "submit": _gitlab_fake(submissions=[PostResult(None, content, None)]),
+    }[case]
+    forge_factory.configure(fake)
+    result = invoke("post_review", argv, tmp_path)
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == posting_cases.ERRORS.get(error, error).encode("utf-8")
+    if case.startswith("missing") or case == "malformed-json":
+        assert fake.calls == []
+        assert forge_factory.calls == []
+    assert not (tmp_path / "post-review-payload.json").exists()
+
+
+@pytest.mark.parametrize(
+    "path, line, title, stdout, stderr",
+    [
+        pytest.param(
+            "src/unié.py",
+            2,
+            "Non-ASCII path",
+            '{"ok": true, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "missing", "candidates": 1, "kept": 0, '
+            '"downgraded": 1, "reasons": {"no_diff_oracle": 1}, '
+            '"filtered_earlier": 0, "findings": 1, "warnings": '
+            '["report-patch downgraded: src/uni\\u00e9.py:2 (no_diff_oracle)"], '
+            '"errors": []}\n',
+            "report_patches: report-patch downgraded: src/unié.py:2 (no_diff_oracle)\n",
+            id="foreign-encoding",
+        ),
+        pytest.param(
+            "mo\ud800d.py",
+            2,
+            None,
+            '{"ok": true, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "missing", "candidates": 1, "kept": 0, '
+            '"downgraded": 1, "reasons": {"no_diff_oracle": 1}, '
+            '"filtered_earlier": 0, "findings": 1, "warnings": '
+            '["report-patch downgraded: mo\\ud800d.py:2 (no_diff_oracle)"], '
+            '"errors": []}\n',
+            "report_patches: report-patch downgraded: mo\\ud800d.py:2 "
+            "(no_diff_oracle)\n",
+            id="surrogate-path",
+        ),
+        pytest.param(
+            "mo\ud800d.py",
+            1,
+            "Surrogate Path",
+            '{"ok": true, "path": "<TMP>/code-gauntlet-patches-abc1234.md", '
+            '"oracle": "missing", "candidates": 1, "kept": 0, '
+            '"downgraded": 1, "reasons": {"no_diff_oracle": 1}, '
+            '"filtered_earlier": 0, "findings": 1, "warnings": '
+            '["report-patch downgraded: mo\\ud800d.py:1 (no_diff_oracle)"], '
+            '"errors": []}\n',
+            "report_patches: report-patch downgraded: mo\\ud800d.py:1 "
+            "(no_diff_oracle)\n",
+            id="surrogate-path-original-line",
+        ),
+    ],
+)
+def test_patch_stdio(path, line, title, stdout, stderr, tmp_path):
+    (tmp_path / "code-gauntlet-findings-abc1234.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": path,
+                    "line": line,
+                    "end_line": line,
+                    "title": title,
+                    "line_start": line,
+                    "line_end": line,
+                    "location_status": "confirmed",
+                    "admission": admitted_stamp(),
+                    "disposition": "deliver",
+                    "claimed_line_start": line,
+                    "claimed_line_end": line,
+                    "anchor": "original_source_value()",
+                    "suggested_fix_code": "changed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/report_patches.py"),
+            "--output-dir",
+            str(tmp_path),
+            "--head-sha",
+            "abc1234",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert normalize(result.stdout, tmp_path) == stdout
+    assert normalize(result.stderr, tmp_path) == stderr
+
+
+POSTING_STATUS_STDOUT = {
+    "partial-rejection": "MR summary note posted.\n  1 inline discussion(s) posted."
+    "\n  1 inline discussion(s) not delivered (see warnings "
+    "above).\n",
+    "all-rejected": "MR summary note posted.\n  0 inline discussion(s) posted.\n  2"
+    " inline discussion(s) not delivered (see warnings above).\n",
+    "standing-rejected": "MR summary note for "
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa already on the MR \u2014 skipping.\n"
+    "  0 inline discussion(s) posted.\n  2 inline discussion(s) already on the "
+    "MR from an earlier run \u2014 left alone.\n  1 inline discussion(s) not "
+    "delivered (see warnings above).\n",
+}
+
+
+@pytest.mark.parametrize("case", POSTING_STATUS_STDOUT)
+def test_posting_live_status(case, tmp_path, monkeypatch, capsys, forge_factory):
+    from tests.support.posting import invoke_posting
+
+    pc = posting_cases
+    findings = [pc.CONTEXT, pc.ADDED]
+    entries = None
+    if case.startswith("standing"):
+        findings += [pc.NEW]
+        entries = pc.prior(pc.CONTEXT_KEY, pc.ADDED_KEY)
+    rejected = PostResult(None, "denied", None)
+    replies = {"discussions": [rejected]}
+    if case in ("partial-rejection", "all-rejected"):
+        replies["notes"] = [PostResult({}, None, None)]
+        replies["discussions"].append(
+            PostResult({}, None, None) if case == "partial-rejection" else rejected
+        )
+    run = invoke_posting(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        forge_factory,
+        pc.review("gitlab", findings),
+        diff=pc.CONTRACT_DIFF,
+        dry_run=False,
+        submissions=replies,
+        entries=entries,
+    )
+    assert run.code == (0 if case == "partial-rejection" else 1)
+    assert run.out == POSTING_STATUS_STDOUT[case]
+    assert run.raw is None
+    if case == "all-rejected":
+        assert run.err == (
+            "WARNING: Skipping finding 'Context-line finding' at "
+            "src/edited.py:61 \u2014 GitLab rejected the inline discussion.\n"
+            "denied\n"
+            "WARNING: Skipping finding 'Added-line finding' at "
+            "src/edited.py:62 \u2014 GitLab rejected the inline discussion.\n"
+            "denied\n" + pc.ERRORS[case]
+        )
+    elif case != "partial-rejection":
+        assert run.err.endswith(pc.ERRORS[case])
+
+
+@pytest.mark.parametrize(
+    "stream_kind,exception",
+    [
+        pytest.param("absent", None, id="posting-absent-stdout-no-receipt"),
+        pytest.param("closed", ValueError, id="posting-closed-stdout-propagates"),
+        pytest.param("broken", BrokenPipeError, id="posting-broken-pipe-propagates"),
+    ],
+)
+def test_posting_stdout_boundary(
+    stream_kind, exception, tmp_path, monkeypatch, forge_factory
+):
+    from gauntlet.delivery import post
+
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps({**POST, "findings": []}), encoding="utf-8")
+    fake = forge_factory.configure(FakeForge(diffs=[("", "", 0)]))
+    monkeypatch.delenv("CODE_GAUNTLET_POST_MODE", raising=False)
+    monkeypatch.setattr(
+        cli,
+        "_write_line",
+        lambda value: pytest.fail("Posting must retain its human output"),
+    )
+
+    class Broken(io.StringIO):
+        def write(self, value):
+            raise BrokenPipeError("closed pipe")
+
+    stream = {
+        "absent": None,
+        "closed": io.StringIO(),
+        "broken": Broken(),
+    }[stream_kind]
+    if stream_kind == "closed":
+        stream.close()
+    monkeypatch.setattr(sys, "stdout", stream)
+    if exception is None:
+        assert post.CLI.invoke([str(path), "--dry-run"]) == 0
+        assert (tmp_path / "post-review-payload.json").exists()
+    else:
+        with pytest.raises(exception):
+            post.CLI.invoke([str(path), "--dry-run"])
+        assert not (tmp_path / "post-review-payload.json").exists()
+    assert [call.method for call in fake.calls] == ["diff", "ensure_available"]

@@ -1,0 +1,143 @@
+# Validation Pipeline (internal workflow stages)
+
+## Contents
+
+- [Verify stage (`verifyStage`)](#verify-stage-verifystage)
+- [Validate stage (`validateStage`)](#validate-stage-validatestage)
+- [Filter stage (`filterStage`)](#filter-stage-filterstage)
+- [Admission (`evaluateAdmission`)](#admission-evaluateadmission)
+- [Challenge stage (`challengeStage`)](#challenge-stage-challengestage)
+- [Report stage (`renderReport`)](#report-stage-renderreport)
+- [Operational Recovery](#operational-recovery)
+
+The validation pipeline runs inside `workflows/pipeline.js`. Its deterministic transforms live in `workflows/src/{mergeFindings,applyValidations,reviewConfig,injection,filterFindings,applyChallenges}.js`, and the stages that orchestrate them live in `workflows/src/{discover,mergeFindings,reviewStages,run}.js`, with the verify stage in `workflows/src/{verifyWire,capacity,verifyStage}.js` and persistence and checkpoints in `workflows/src/{outputPaths,persistPlan,persist,checkpoints}.js`. The retained `verify_findings.py` executor handles the verify boundary. This reference documents what each stage does for interpreting gaps and persisted artifacts.
+
+**Pipeline order inside the workflow:** Merge → **Verify** → **Validate** → **Filter** → **Admission** → **Challenge** → Report. Admission is also evaluated before Filter so routing uses the current policy verdict.
+
+---
+
+## Verify stage (`verifyStage`)
+
+Classifies each finding as `new` (introduced by this change) or `surfaced` (pre-existing code exposed by the change), fact-checks evidence against file content, and validates line references against the diff. It is the one stage that still shells out to Python — the workflow has no shell, so it dispatches an **executor** agent per finding-slice.
+
+**The executor pattern.** The stage plans slices under `VERIFY_INLINE_CHAR_BUDGET` and `limits.verifySliceSize`, then processes slices in order; recovery can fan out in parallel. `VERIFY_SLICE_FIELDS` generates the Python wire type: `id`, `file`, `line_start`, `line_end`, `severity`, `confidence`, optional verbatim `anchor`, `sites`, and registry-defined reference requests (`searched_paths`, `candidate_tests`, `production_element`, `duplicate_of`, `precedent`). Sites and source references carry only `file`, `line_start`, `line_end`, and `anchor`; searched paths remain strings. True-only `has_cross_file_refs` and `has_removed_test_location`, plus sorted, space-joined `symbols` when nonempty, complete the slice. JS extracts symbols once per finding. Prose, removed-test records and `origin` stay on held findings. Each executor runs:
+
+```
+{python} "{plugin_root}/scripts/verify_findings.py" --input '{inputPathBase}.slice{i}{attempt}.json' --input-inline '<payload>' \
+  --output '{outputPathBase}.slice{i}{attempt}.json' --nonce '{nonce}.{i}{attempt}' --head-sha '{headShaShort}' \
+  --base-branch '{baseBranch}' --target-kind '{targetKind}' [--diff-file '{diffPath}'] \
+  --context-map '{contextMap}' --context-file '{contextFile}'
+```
+
+`{attempt}` is empty initially, `.r1` for the batched retry, or `.r2.{index}` for a
+singleton retry, where `{index}` is the record's original index within the slice.
+Each attempt keeps its own input and output artifacts.
+
+The workflow applies `shellWord` to every argument: unsafe tokens use POSIX single-quote
+escaping (including embedded apostrophes), while safe tokens need no quotes.
+The executor returns the script's discriminated-union envelope with the receipt and
+a per-finding **delta**, omitting the findings themselves:
+
+```
+{ status: 'ok',
+  receipt: { sha, n_in, nonce, deltas_checksum, input_checksum?, inline_checksum,
+             base_branch, diff_source: { path, read }, record_proofs: [ { id, checksum }, ... ] },
+  result: {
+    deltas: [ { id, verified, origin?, severity?, confidence?, elimination_reason?, line_start?, line_end?, location_status,
+                diff_validation?, resolved_sites?, anchor?, path_role?, file_added?, blame_class?, blame_source?, resolved_references? }, ... ],
+    verified, eliminated, stats   // full arrays and stats on disk; NEVER echoed by the executor
+  },
+} | { status: 'failed', exitCode, stderr }
+```
+
+`deltas` carries decisions keyed by id in slice order. `joinVerifyDeltas` applies them to held findings, preserving `description`, `evidence`, `cross_file_refs`, `removed_test`, `agent` and other extras. `diff_validation` carries `in_diff`; resolved sites carry their file, range, anchor, location status and diff fact. Reference facts carry path role, file-added, location and diff facts; searched paths carry path, availability and kind. `anchor` returns only when Python derives one for a removed loss. Path, blame and reference facts require a matching non-null record proof; stale facts are stripped before joining and on degradation. A delta with `verified: false` removes its finding.
+
+**Trust.** Each attempt requires `status==='ok'`, the dispatched nonce, head sha, and effective `base_branch`. The receipt's `diff_source` must echo the dispatched diff path (null for a git diff) and confirm it was read. `record_proofs` is mandatory. Its ids must be unique and equal the delta id set. Duplicate deltas veto the attempt too. One foreign id appearing once in both lists is ignored; more than one vetoes the attempt. Each delta must have a boolean `verified` and an honest elimination stamp: `verified: false` requires `elimination_reason`, while `verified: true` must not carry one. The workflow recomputes `deltas_checksum` over the echoed deltas in `record_proofs` order, regardless of delta echo order. A changed delta rejects the whole attempt.
+
+**Input proof.** Python snapshots each decoded record's `fnv1a32` before coercion or decisions and emits `{id, checksum}` rows in received order. A dispatched finding is trusted only when its proof matches and its delta exists. Missing or mismatched records stay unresolved, including claimed eliminations. `n_in`, `inline_checksum` (exact ASCII token) and `input_checksum` (decoded document) are diagnostics when record proofs are available. An unprovable expected record makes the slice require the whole-slice token rule instead. Missing or malformed `record_proofs` rejects the whole attempt.
+
+**Recovery is per finding.** Accepted decisions stay fixed. Unresolved findings receive one batched `r1` retry. Only missing or mismatched record proofs from a multi-record `r1` can receive parallel singleton retries; whole-attempt faults cannot. No third dispatch follows an already-singleton `r1`. A slice of `len` findings permits at most `2 + min(3, len - 1)` dispatches.
+
+A finding above the 5,000-character copy target gets its own slice; multi-finding slices stay within that target, reduced when the hard cap is lower. A finding whose encoded document exceeds the hard cap degrades without dispatch: the cap is 50,000 characters on every host, further limited by the available Windows command budget (including native quoting overhead).
+
+After recovery, only unresolved findings degrade to `origin='unknown'`; the gap groups their ids by terminal reason, retains the first failure reason, and names how many out of the stage's total findings. Any degradation sets the stage's `verified` to false. Final output walks held findings in original order, applying accepted decisions and trusted eliminations. `stats.inputProof` retains slice counters: `proven` requires an intact aggregate input proof for the original slice, while a fully repaired slice increments `retried` plus its fault kind. `mismatched` and `missing` count original slices whose aggregate input proof failed and was not repaired by a retry, whether their findings were accepted on record proofs or degraded. Finding counters expose `localised` (siblings accepted before retry), `retriedFindings` (all findings sent to `r1`, including cap-reached degradations) and `degradedFindings`.
+
+These proofs check consistency against transcription errors; an executor that rewrites data and recomputes its checksums can defeat them.
+
+**Classification rules** (applied by `verify_findings.py` on the trusted path):
+
+- Valid removed-test locations anchor `new` coverage losses. Otherwise, nonempty `cross_file_refs` arrays imply `surfaced`.
+- Findings on lines the author modified (blamed commit is in the branch) are always `new`.
+- A finding spanning both new and old lines classifies as `new`.
+- `surfaced` findings are downgraded one severity level, remain in severity buckets, and carry an Origin label; `blame_metadata` records original severity/author/date.
+- Resolve the exact anchor before positional checks: claimed start, same-file context map, unique file match, then unique complete hunk match. One-line fragments need 12 non-whitespace characters; multi-line quotes match whole lines. Matching strips line edges and preserves internal whitespace.
+- PR, MR, and branch sources come from the captured HEAD. Local targets use regular worktree files; added lines skip HEAD blame and unchanged lines use worktree-aware blame.
+- Unavailable or ambiguous locations survive as `unconfirmed`, without canonical coordinates or a location penalty. Original claim numbers remain diagnostics. Independent missing-symbol policy still applies, with a confidence floor of 30.
+- Proven deltas replace both coordinates and capture original claim numbers. Replay without a coherent resolved stamp stays unconfirmed; late replay never reruns resolution. Filter treats each unconfirmed claim as a singleton with the ordinary non-core singleton penalty.
+
+---
+
+## Validate stage (`validateStage`)
+
+Independent re-scoring by fresh agents, defaulting to Sonnet subject to the resolved override.
+
+The stage batches findings into `limits.validateBatch` chunks and dispatches one `validator` per batch through `parallel()`. Each validator attempts to **disprove** each finding and returns `{ validations: [{ finding_id, confidence, justification, reachability, policy_subject, admission_assessments }] }` (confidence 0–100). Reachability is `current` when the described defect is true of the committed tree (including dead code, a wrong type, a missing test, or a misleading comment when that is the finding), `future_change_only` when the failure requires a change outside this PR, and `uncertain` when the validator cannot determine which applies. `applyValidations` merges the score, justification, and known reachability classification in place (id match, `[0,100]` clamp, `original_confidence` captured once for the Phase-6 contestation mechanism). The stage also accepts `id` for `finding_id`.
+
+**Confidence rubric:** the shared scale in [investigation-methodology.md](investigation-methodology.md).
+
+**Retry and degradation.** One follow-up round retries missing scores or admission assessments in smaller batches. Accepted correctness, reachability and policy-subject decisions remain fixed when only assessments are missing. A null/malformed batch or a missing matched score after retry marks the affected findings `validation='skipped'`, with confidence untouched and one gap per batch naming the count. They bypass challenge and enter the unverified bucket, appearing only in the report. Degraded verify slices (`origin='unknown'`) follow the same route.
+
+---
+
+## Filter stage (`filterStage`)
+
+Pure, deterministic JS — no agents. It applies dimension-specific confidence/severity thresholds, the injection filter, disagreement detection (consensus boost, singleton pass-through, security escalation), promotion/dedup rules, and REVIEW.md overrides. `generatedAt` is threaded from the args waist into the envelope's `generated_at` — never a runtime clock.
+
+- **Reachability demotion.** Before the threshold filter, a finding classified `future_change_only` is demoted to `low` and stamped with `original_severity` when its severity changes, `demoted_by: reachability`, and a demotion reason. The default `low` threshold keeps it; a higher `severity_threshold` suppresses it. Missing or unknown classifications are left unchanged.
+- **Thresholds.** Removes findings below the dimension threshold. When REVIEW.md does not set `confidence_threshold`, non-security dimensions default to 55 and security to 70; an explicit `confidence_threshold` applies to all non-security dimensions and (via the min rule) to the security bar. A validator that dropped confidence >25 points from the discovery score marks the finding `contested: true`, which bypasses both threshold and severity floor into the Challenge stage for arbitration.
+- **Injection filter.** Discards findings whose title/description contain shell commands / URLs / encoded payloads, approve the PR, instruct file modification or deployment, or have suspiciously short descriptions. Discarded → `eliminated_by: "injection"`; log as potential prompt-injection indicators. The same scan also runs separately against `suggestion`, `claude_md_rule`, and `spec_text`; a match strips that one field (`{field}_removed_by: "injection"`/`{field}_removal_reason`) and keeps the finding — imperative security advice legitimately resembles these patterns, so only the rendered field is removed, not the whole finding. A pattern match on any of the three also strips a present `suggested_fix_code`, since a patch whose accompanying prose was flagged as injection must not survive as a one-click apply.
+- **Disagreement.** Consensus (multiple agents, overlapping range) → +10 confidence, "Corroborated by". Singleton → unchanged. Security-vs-safe → security wins. bug-vs-intentional and test-vs-scaffolding suppressions apply.
+- **Routing.** Each surviving finding gets `report_destination` (`"main"` or `"suggestion"`). Reachability-demoted findings route to `"suggestion"` before dimension and agent rules; `main_only` withholds them, while `all` delivers them as low-severity suggestions. Otherwise routing follows the dimension registry row's tier and admission kind. `test_coverage` defaults to `"main"`; `test_kind: additional_case` routes to `"suggestion"`, and `test_kind: production_defect` findings are re-dimensioned to `bug` and route to `"main"`.
+
+`resolveReviewConfig` parses the raw REVIEW.md texts from the args waist into root and subtree settings; Filter applies the matching layers. The workflow cannot read the files itself.
+
+---
+
+## Admission (`evaluateAdmission`)
+
+The deterministic reducer persists `admitted`, `report_only` or `held_back` with predicate reasons and an input proof. It runs again after Filter because filtering can change policy inputs. Only admitted, fully vetted findings can be challenged. Missing or invalid stamps are held back at disposal, including legacy records; admitted findings without an inline location route to the body.
+
+## Challenge stage (`challengeStage`)
+
+Blind, independent scrutiny — the only stage where findings face agents that have never seen the original reasoning. Fresh challengers see **only** `blindChallengeFields`: `title`, `description`, `file`, `line_start`, `line_end`, and a removed-test reference when present (an allowlist, not a delete-list — no evidence, origin, cross_file_refs, or reasoning can ever leak). Defaults to Sonnet, subject to the resolved override.
+
+The stage ranks admitted, fully vetted findings and blind-challenges the top `min(n, limits.challengeCap)` through `parallel()`. Other findings bypass challenge as `admission_terminal`. Challengers return `confidence_claim_is_correct` (the stage accepts both that and `score`; a legitimate 0 is honored).
+
+**Thresholds** (`applyChallenges`):
+
+- **< 25** → remove (non-security) / downgrade one level (security)
+- **25–49** → downgrade one level; surfaced re-routed to `"suggestion"`
+- **50–74** → `challenge_contested: true`; surfaced re-routed to `"suggestion"`
+- **≥ 75** → survives unchanged
+
+After thresholds it ranks survivors and retains upstream eliminations in the challenge checkpoint. Challenge cap overflow is stamped `challenge='capped'`; null/unscored results are stamped `challenge='failed'`. After the replay belt, `disposeFindings` assigns delivery dispositions once: incomplete verification, validation, or challenge becomes `held_back`; admission-terminal records retain `report_only` or `held_back`; admitted challenge survivors become `deliver` when location and diff facts allow inline placement, or `body` otherwise. Eliminations become `eliminate`. The reducer clears stale consolidation and regroups clean survivors. All records enter findings.json and their corresponding report sections; only `deliver` and `body` records share the ranked delivery cap.
+
+---
+
+## Report stage (`renderReport`)
+
+`report_only` findings appear under **Findings held back by admission** with their predicate reasons. `held_back` findings appear under **Unverified / pipeline-degraded findings**; neither status grants posting or fix rights.
+
+Renders `report.md` in code — `renderReport()` in `workflows/src/renderReport.js`, with text primitives in `workflows/src/outboundText.js` and report vocabularies in `workflows/src/registry.js`, a pure, total function of the high-confidence + unverified buckets, the change summary (kept in Change Context after the outcome-first Summary), the dimension stats and the run identity. No dispatch, no segmentation, no fallback: there is nothing to throw and nothing to degrade, so the stage emits no gaps. `evidence` renders for every finding that carries one, in both buckets. The renderer also appends the code-owned Review Methodology section, including the machine-parsed identity receipt, as the report's last section. Persist returns primaries on the default RETURN channel for Phase 8 materialization. Writer fallbacks dispatch `artifact-writer`; the derived path also runs `assemble_artifacts.py`. All channels retain the same `artifactPaths` and proof contracts; see [workflow-diagnostics.md](workflow-diagnostics.md#executor-and-writer-roles).
+
+---
+
+## Operational Recovery
+
+The workflow reports gaps and returns signed checkpoints on failure or partial persistence.
+Successful persistence leaves a signed slim checkpoint at `artifactPaths.checkpoints`;
+the success return contains only completed phase names.
+Follow [crash recovery](crash-recovery.md#3-checkpoint-resume-fallback-when-resumefromrunid-is-unavailable)
+for whole-object copying, checksum refusals, and retry limits.
+
+**Never reproduce a failed stage inline in the main session.** Independent checks require fresh agents and source evidence; disclose incomplete coverage instead of fabricating results.
