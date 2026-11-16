@@ -1,0 +1,303 @@
+"""Registry interpretation and the configuration receipt consumed by callers."""
+
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from gauntlet import config as resolver
+from gauntlet.registry import KNOB_REGISTRY
+
+ROOT = Path(__file__).resolve().parents[1]
+
+DEFAULT_ECHO = {
+    mode: {
+        row["key"]: {
+            "value": row["defaults"][mode][0],
+            "source": row["defaults"][mode][1],
+        }
+        for row in cast(tuple[dict[str, Any], ...], KNOB_REGISTRY)
+        if mode in row["modes"]
+    }
+    for mode in ("interactive", "headless")
+}
+INTERACTIVE_ECHO = DEFAULT_ECHO["interactive"]
+HEADLESS_ECHO = DEFAULT_ECHO["headless"]
+HEADLESS_RESOLVED = {
+    "model_tier": "optimized",
+    "delivery": ["markdown"],
+    "post_mode": "dry-run",
+    "draft_policy": "review",
+    "reviewed_policy": "full",
+    "pr_not_found_policy": "error",
+}
+
+
+@pytest.fixture
+def config_cli(invoke, monkeypatch):
+    def call(arguments=(), cwd=ROOT, **values):
+        for name in list(resolver.os.environ):
+            if name.startswith("CODE_GAUNTLET_"):
+                monkeypatch.delenv(name)
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+        return invoke("resolve_config", list(arguments), cwd)
+
+    return call
+
+
+ENUM_RULE = {"kind": "enum", "values": ["Chat"]}
+CSV_RULE = {"kind": "csv_subset", "values": ["chat", "markdown"]}
+POSITIVE_RULE = {"kind": "positive_digits"}
+NULLABLE_RULE = {"kind": "digits_or_null"}
+_RULE_ROWS = [
+    ("enum-exact", ENUM_RULE, "Chat", "headless", True),
+    ("enum-case", ENUM_RULE, "chat", "headless", False),
+    ("csv-subset", CSV_RULE, "chat,markdown", "headless", True),
+    ("csv-duplicate", CSV_RULE, "chat,chat", "headless", False),
+    ("positive-one", POSITIVE_RULE, "1", "headless", True),
+    ("positive-zero", POSITIVE_RULE, "0", "headless", False),
+    ("digits-zero", NULLABLE_RULE, "0", "interactive", True),
+    ("digits-null", NULLABLE_RULE, "null", "interactive", True),
+    ("digits-unsafe", NULLABLE_RULE, "9007199254740992", "interactive", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("rule", "value", "mode", "expected"),
+    [pytest.param(*row, id=name) for name, *row in _RULE_ROWS],
+)
+def test_rules_are_exact_and_fail_closed(rule, value, mode, expected):
+    assert resolver.matches_rule(rule, value, mode) is expected
+
+
+_INVALID_PIN_ROWS = [
+    ("model-enum", "headless", "MODEL_TIER", "bad", "{optimized}"),
+    ("delivery-csv", "headless", "DELIVERY", "bad", "{chat,pr_comments,markdown}"),
+    ("positive-cap", "headless", "PR_COMMENT_CAP", "0", "{positive integer}"),
+    (
+        "interactive-cap",
+        "interactive",
+        "PR_COMMENT_CAP",
+        "not-a-cap",
+        "{digits or null}",
+    ),
+    (
+        "interactive-model-standard",
+        "interactive",
+        "MODEL_TIER",
+        "standard",
+        "{optimized}",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mode", "variable", "value", "allowed"),
+    [
+        pytest.param(mode, "CODE_GAUNTLET_" + variable, value, allowed, id=name)
+        for name, mode, variable, value, allowed in _INVALID_PIN_ROWS
+    ],
+)
+def test_invalid_pins_are_exact_and_stdout_is_empty(
+    mode, variable, value, allowed, config_cli
+):
+    values = {
+        variable: value,
+        "CODE_GAUNTLET_HEADLESS": "1" if mode == "headless" else "0",
+    }
+    result = config_cli(["--target", "pr"], **values)
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert (
+        result.stderr.decode()
+        == f"HEADLESS CONFIG ERROR: {variable}={value} not in {allowed}\n"
+    )
+
+
+def test_control_values_are_json_encoded_on_the_error_line(config_cli):
+    result = config_cli(
+        ["--target", "pr"],
+        CODE_GAUNTLET_HEADLESS="1",
+        CODE_GAUNTLET_DELIVERY="bad\nvalue",
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr.decode() == (
+        'HEADLESS CONFIG ERROR: CODE_GAUNTLET_DELIVERY="bad\\nvalue" '
+        "not in {chat,pr_comments,markdown}\n"
+    )
+
+
+@pytest.mark.parametrize("mode", ["interactive", "headless"])
+def test_cli_shape_identity_and_stderr_block(config_cli, mode):
+    arguments = ["--target", "pr"] if mode == "headless" else []
+    result = config_cli(
+        arguments, CODE_GAUNTLET_HEADLESS="1" if mode == "headless" else "0"
+    )
+    assert result.returncode == 0
+    assert result.stdout.endswith(b"\n")
+    payload = json.loads(result.stdout)
+    manifest = json.loads(
+        (ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    # The manifest is independent of the bundle the resolver reads.
+    identity = {
+        "pipeline_version": manifest["version"],
+        "plugin_root": ROOT.as_posix(),
+        "repo_root": ROOT.as_posix(),
+    }
+    echo = HEADLESS_ECHO if mode == "headless" else INTERACTIVE_ECHO
+    resolved = HEADLESS_RESOLVED if mode == "headless" else {"model_tier": "optimized"}
+    if mode == "headless":
+        assert payload["waist"]["configEcho"]["pr_comment_cap"] == {
+            "value": "25",
+            "source": "default",
+        }
+    label = "Headless" if mode == "headless" else "Resolved"
+    prefix = f"{label} config:\n" + "".join(
+        f"  {key}={entry['value']} ({entry['source']})\n" for key, entry in echo.items()
+    )
+    block = (
+        prefix + f"  pipeline_version={manifest['version']} (bundle)\n"
+        f"  plugin_root={ROOT.as_posix()} (resolved)"
+    )
+    expected = {
+        "mode": mode,
+        "target": "pr" if mode == "headless" else None,
+        "block": block,
+        "waist": {"configEcho": echo},
+        "resolved": resolved,
+        "identity": identity,
+    }
+    assert payload == expected
+    assert (
+        result.stdout.decode()
+        == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    )
+    assert result.stderr.decode() == block + "\n"
+
+
+@pytest.mark.parametrize("mode", ["headless", "interactive"])
+@pytest.mark.parametrize("value", ["1", "0", "true", " 1 ", ""])
+def test_measurement_trace_gate(config_cli, mode, value):
+    result = config_cli(
+        ["--target", "pr"],
+        CODE_GAUNTLET_HEADLESS="1" if mode == "headless" else "0",
+        CODE_GAUNTLET_MEASUREMENT_TRACE=value,
+    )
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    expected = mode == "headless" and value == "1"
+    assert ("measurementTrace" in payload["waist"]) is expected
+    if expected:
+        assert payload["waist"]["measurementTrace"] is True
+    assert payload["waist"]["configEcho"] == (
+        HEADLESS_ECHO if mode == "headless" else INTERACTIVE_ECHO
+    )
+
+
+def test_cli_identity_separates_plugin_and_repository_roots(config_cli, tmp_path):
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+
+    result = config_cli(cwd=repo)
+    assert result.returncode == 0, result.stderr.decode()
+    identity = json.loads(result.stdout)["identity"]
+    assert identity["repo_root"] == repo.resolve().as_posix()
+    assert identity["plugin_root"] == ROOT.resolve().as_posix()
+
+
+@pytest.mark.parametrize("case", ["usage", "nonrepo"])
+def test_usage_and_setup_fail_without_process_stream_noise(case, config_cli, tmp_path):
+    result = config_cli(
+        ["--target", "wrong"] if case == "usage" else ["--cwd", str(tmp_path)]
+    )
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr.count(b"\n") == 1
+    assert result.stderr.startswith(b"resolve_config: ")
+
+
+def test_plugin_root_must_match(config_cli, tmp_path):
+    result = config_cli(["--plugin-root", str(tmp_path)])
+    assert (result.returncode, result.stdout, result.stderr) == (
+        2,
+        b"",
+        b"resolve_config: plugin root mismatch\n",
+    )
+
+
+@pytest.mark.parametrize("name, expected", [("plugin$cache", 2), ("o'brien plugin", 0)])
+def test_resolver_checks_resolved_plugin_root(
+    name, expected, config_cli, tmp_path, monkeypatch, symlink_or_skip
+):
+    root = tmp_path / name
+    bundle = root / "workflows/pipeline.js"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("const PIPELINE_VERSION = 'test';\n", encoding="utf-8")
+    alias = tmp_path / "plugin"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(resolver, "PLUGIN_ROOT", str(alias))
+    result = config_cli()
+    assert result.returncode == expected, result.stderr
+    if expected == 2:
+        assert result.stdout == b""
+        assert result.stderr == (
+            b"resolve_config: resolved plugin root contains shell-active or control "
+            b"characters; install the plugin at a shell-safe path\n"
+        )
+    else:
+        assert json.loads(result.stdout)["identity"]["plugin_root"] == root.as_posix()
+
+
+def test_missing_bundle_version_is_setup_failure(tmp_path):
+    bundle = tmp_path / "workflows" / "pipeline.js"
+    bundle.parent.mkdir()
+    bundle.write_text("const not_version = 'x';", encoding="utf-8")
+    with pytest.raises(
+        resolver.ResolverSetupError,
+        match="PIPELINE_VERSION not found in workflow bundle",
+    ):
+        resolver.read_pipeline_version(str(tmp_path))
+
+
+def test_git_root_probe_oserror_is_setup_failure(config_cli, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("probe denied")
+
+    monkeypatch.setattr(resolver.proc, "run", fail)
+    result = config_cli()
+    assert (result.returncode, result.stdout, result.stderr) == (
+        2,
+        b"",
+        b"resolve_config: git repository probe failed: probe denied\n",
+    )
+
+
+def assert_resolved_mentions(root):
+    allowed = {
+        "model_tier",
+        "delivery",
+        "post_mode",
+        "draft_policy",
+        "reviewed_policy",
+        "pr_not_found_policy",
+    }
+    for path in root.rglob("*.md"):
+        for match in re.finditer(
+            r"(?:configResult\.)?resolved\.([a-z_]+)", path.read_text(encoding="utf-8")
+        ):
+            assert match[1] in allowed, f"{path}: {match[1]}"
+
+
+def test_caller_resolved_mentions(tmp_path):
+    assert_resolved_mentions(ROOT / "skills/code-gauntlet")
+    (tmp_path / "invalid.md").write_text(
+        "Use `resolved.pr_comment_cap`.\n", encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match="pr_comment_cap"):
+        assert_resolved_mentions(tmp_path)

@@ -1,0 +1,106 @@
+import { ADMISSION_PREDICATES, VERIFY_FACT_PROPERTIES, FINDING_PROP_TYPES, DIMENSIONS, findingPolicy } from './registry.js';
+import { verdictRule } from './verdict.js';
+import { canonicalRange } from './location.js';
+import { fnv1a32 } from './wire.js';
+
+const resolvedReference = (ref) => canonicalRange(ref) !== null;
+const hasValue = (value) => typeof value === 'string' && value.trim().length > 0;
+
+const ADMISSION_INPUT_FIELDS = [...new Set(['id', 'file', 'anchor', 'dimension', 'origin_dimension', 'agent', 'origin', 'validation',
+  'verdict', 'verdict_route', 'refutation_check', 'validator_refutation_check', 'challenge_refutation_check', 'validator_verdict', 'challenge_verdict', 'policy_subject', 'admission_assessments', 'reachability', 'location_status', 'line_start', 'line_end', 'diff_validation',
+  'reference_diagnostics', ...Object.keys(VERIFY_FACT_PROPERTIES),
+  ...DIMENSIONS.flatMap((row) => row.admission ? [row.admission.field,
+    ...Object.values(row.admission.kinds).flatMap((kind) => [...kind.required, ...(kind.optional || [])])] : [])])];
+function admissionProof(finding, fields) {
+  const verdict = { ...finding.admission };
+  delete verdict.input_proof;
+  return fnv1a32(JSON.stringify({ verdict, inputs: [...ADMISSION_INPUT_FIELDS, ...fields].map((key) =>
+    ADMISSION_PRESENCE_FIELDS.has(key) ? hasValue(finding[key]) : finding[key] ?? null) }));
+}
+
+// Delivery rewrites host paths in prose; only its presence is a policy input.
+const ADMISSION_PRESENCE_FIELDS = new Set(DIMENSIONS.flatMap((row) => row.admission
+  ? Object.values(row.admission.kinds).flatMap((kind) => [...kind.required, ...(kind.optional || []), ...(kind.anyOf || [])])
+    .filter((key) => { const schema = row.schemaExtra[key] || FINDING_PROP_TYPES[key]; return schema === 'string' || (schema?.type === 'string' && !schema.enum); })
+  : []));
+
+function referenceResult(finding, name) {
+  if (resolvedReference(finding.resolved_references?.[name])) return null;
+  const supplied = finding[name] !== undefined || finding.reference_diagnostics?.some((diagnostic) => diagnostic.field === name);
+  return supplied ? 'held_back' : 'report_only';
+}
+
+const prOwnedTest = (finding) => finding.path_role === 'test' && finding.diff_validation?.in_diff === true;
+
+export function hasAdmission(finding) {
+  const stamp = finding?.admission;
+  return stamp?.version === 1 && ['admitted', 'report_only', 'held_back'].includes(stamp.status)
+    && Array.isArray(stamp.reasons) && Array.isArray(stamp.input_fields)
+    && stamp.input_proof === admissionProof(finding, stamp.input_fields);
+}
+
+// The route table names findings needing another reader even while locally withheld.
+export function challengeEligible(finding) {
+  return finding.origin !== 'unknown' && ((verdictRule(finding).challenge === true)
+    || (hasAdmission(finding) && finding.admission.status === 'admitted'));
+}
+
+function factAssessment(finding, predicate) {
+  const ref = finding.resolved_references;
+  const facts = {
+    pr_owned_test: () => {
+      if (prOwnedTest(finding)) return null;
+      return finding.diff_validation?.in_diff == null ? 'held_back' : 'report_only';
+    },
+    criticality: () => typeof finding.criticality === 'number' && finding.criticality >= 8 ? null : 'report_only',
+    searches: () => {
+      const incomplete = !Array.isArray(ref?.searched_paths) || ref.searched_paths.length === 0
+        || ref.searched_paths.some((path) => path.available !== true) || !Array.isArray(ref?.candidate_tests)
+        || ref.candidate_tests.some((test) => !resolvedReference(test))
+        || !Array.isArray(finding.candidate_tests) || finding.candidate_tests.some((test) => !hasValue(test?.input) || !hasValue(test?.assertion))
+        || finding.reference_diagnostics?.length;
+      return incomplete ? 'held_back' : null;
+    },
+    production_element: () => referenceResult(finding, 'production_element'),
+    duplicate_of: () => referenceResult(finding, 'duplicate_of'),
+    precedent: () => referenceResult(finding, 'precedent'),
+    precedent_not_added: () => {
+      const result = referenceResult(finding, 'precedent');
+      if (result) return result;
+      if (ref.precedent.file_added == null) return 'held_back';
+      return ref.precedent.file_added ? 'report_only' : null;
+    },
+    equivalent: () => hasValue(finding.suggestion) || hasValue(finding.suggested_fix_code) ? null : 'report_only',
+  };
+  return Object.hasOwn(facts, predicate) ? facts[predicate]() : 'held_back';
+}
+
+// Re-evaluate the persisted verdict after filtering changes inputs; disposal and sinks only consume it.
+export function evaluateAdmission(finding) {
+  delete finding.admission;
+  delete finding.effective_test_kind;
+  const rule = verdictRule(finding);
+  const verified = ['new', 'modified', 'surfaced', 'pre_existing'].includes(finding.origin);
+  const { row, kind } = findingPolicy(finding);
+  const kindReasons = [];
+  if (rule.status === 'admitted') {
+    if (!row || (row.admission && !kind)) kindReasons.push({ predicate: 'kind', status: 'held_back' });
+    // A posting verdict replaces discovery's semantic categorization, while deterministic restrictions remain.
+    if (kind?.phase === 'deterministic' && kind.defaultDisposition === 'report_only') kindReasons.push({ predicate: 'value', status: 'report_only' });
+    for (const predicate of kind?.predicates || []) {
+      const descriptor = ADMISSION_PREDICATES[predicate];
+      const result = descriptor?.fact ? factAssessment(finding, descriptor.fact) : null;
+      if (result) kindReasons.push({ predicate, status: result });
+    }
+  }
+  let status = !verified ? 'held_back' : rule.status;
+  if (status === 'admitted' && kindReasons.length) status = kindReasons.some((r) => r.status === 'held_back') ? 'held_back' : 'report_only';
+  finding.admission = { version: 1, input_fields: [], status,
+    reasons: kindReasons.length ? kindReasons : status === 'admitted' ? [] : [{ predicate: verified ? 'verdict' : 'verification', status }],
+    kind: finding[row?.admission?.field] ?? 'ordinary',
+    core: findingPolicy(finding).core, tier: rule.tier,
+    inline_eligible: !kind?.predicates.includes('test_diff_site_for_inline') || prOwnedTest(finding) };
+  finding.admission.input_proof = admissionProof(finding, []);
+  finding.body_fix_task_eligible = status === 'admitted' && rule.route === 'posted' && canonicalRange(finding) !== null;
+  return finding;
+}

@@ -1,0 +1,21 @@
+{
+  "doc": {
+    "findings": [
+      {
+        "id": "bug-1",
+        "file": "src/handler.go",
+        "line_start": 12,
+        "line_end": 14,
+        "description": "The upper bound excludes the last element.",
+        "evidence": "for i := 0; i < len(xs)-1; i++ {",
+        "severity": "high",
+        "confidence": 85,
+        "cross_file_refs": [
+          "src/other.go"
+        ],
+        "origin": "new"
+      }
+    ],
+    "base_branch": "main"
+  }
+}

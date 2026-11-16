@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "id": "T1",
+      "title": "kept"
+    },
+    {
+      "id": null,
+      "title": "dropped"
+    }
+  ]
+}

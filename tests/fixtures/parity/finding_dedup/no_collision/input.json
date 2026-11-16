@@ -1,0 +1,16 @@
+{
+  "findings": [
+    {
+      "id": "T1",
+      "title": "text-one"
+    },
+    {
+      "id": "N1",
+      "title": "ndjson-one"
+    },
+    {
+      "id": "N2",
+      "title": "ndjson-two"
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+"""Boundary fixtures for Python command tests."""
+
+import importlib
+import io
+import json
+import re
+import subprocess
+import sys
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from tests.support.forge import FakeForgeFactory, install_forge_factory
+from tests.support.pipeline import PersistedPayload
+
+ROOT = Path(__file__).resolve().parents[1]
+ENTRY_IMPORT = re.compile(r"^from gauntlet\.([\w.]+) import CLI$", re.MULTILINE)
+
+
+@pytest.fixture(scope="module")
+def _recorded_pipeline_payload(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> PersistedPayload:
+    destination = tmp_path_factory.mktemp("pipeline") / "persisted.json"
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "workflows/test/tools/emit_persisted_findings.mjs"),
+            str(destination),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=True,
+    )
+    payload: PersistedPayload = json.loads(destination.read_text(encoding="utf-8"))
+    return payload
+
+
+@pytest.fixture
+def pipeline_payload(_recorded_pipeline_payload: PersistedPayload) -> PersistedPayload:
+    return deepcopy(_recorded_pipeline_payload)
+
+
+@dataclass(frozen=True, slots=True)
+class Invocation:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+@pytest.fixture
+def invoke(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> Callable[..., Invocation]:
+    def call(
+        name: str, arguments: list[str], cwd: Path, stdin: bytes = b"{}\n"
+    ) -> Invocation:
+        entry = (ROOT / "scripts" / f"{name}.py").read_text(encoding="utf-8")
+        match = ENTRY_IMPORT.search(entry)
+        assert match
+        cli = importlib.import_module(f"gauntlet.{match[1]}").CLI
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(
+            sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8")
+        )
+        capsys.readouterr()
+        try:
+            code = cli.invoke(arguments)
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        except Exception as exc:  # noqa: BLE001
+            # Match the wrapper's exit for uncaught exceptions.
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            code = 1
+        captured = capsys.readouterr()
+        return Invocation(
+            code,
+            captured.out.encode("utf-8", errors="surrogateescape"),
+            captured.err.encode("utf-8", errors="backslashreplace"),
+        )
+
+    return call
+
+
+@pytest.fixture
+def verify_git(monkeypatch):
+    from gauntlet import proc
+
+    calls = []
+    replies = {
+        "log": ("abcdef0123456789\n", "", 0),
+        "blame": ("abcdef0 (First Author 2024-01-02 00:00:00 +0000 1) code", "", 0),
+        "grep": ("source\n", "", 0),
+        "diff": ("", "", 0),
+        "rev-parse": ("abcd\n", "", 0),
+    }
+
+    def output(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        reply = replies[argv[1]]
+        if argv == ["git", "rev-parse", "--show-toplevel"] and reply == (
+            "abcd\n",
+            "",
+            0,
+        ):
+            return str(Path.cwd()), "", 0
+        if callable(reply):
+            return reply(argv)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    def run_bytes(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[1] == "rev-parse":
+            return proc.CompletedProcess(argv, 0, b"abcd" + b"0" * 36 + b"\n", b"")
+        root = Path(kwargs.get("cwd", Path.cwd()))
+        if argv[1] == "ls-tree":
+            path = argv[-1].removeprefix(":(literal)")
+            blob = root / path
+            output = (
+                b"100644 blob " + b"1" * 40 + b"\t" + path.encode() + b"\0"
+                if blob.is_file()
+                else b""
+            )
+            replies["blob_path"] = blob
+            return proc.CompletedProcess(argv, 0, output, b"")
+        return proc.CompletedProcess(argv, 0, replies["blob_path"].read_bytes(), b"")
+
+    monkeypatch.setattr(proc, "run_bytes", run_bytes)
+    monkeypatch.setattr(proc, "output", output)
+    return calls, replies
+
+
+def probe_symlinks(tmp_path_factory):
+    probe = tmp_path_factory.mktemp("symlink-probe")
+    source = probe / "file"
+    source.write_text("x", encoding="utf-8")
+    directory = probe / "directory"
+    directory.mkdir()
+    try:
+        (probe / "file-link").symlink_to(source)
+        (probe / "directory-link").symlink_to(directory, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+@pytest.fixture(scope="module")
+def symlink_or_skip(tmp_path_factory):
+    probe_symlinks(tmp_path_factory)
+
+
+@pytest.fixture
+def forge_factory(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> FakeForgeFactory:
+    from gauntlet.delivery import post
+
+    return install_forge_factory(monkeypatch, getattr(request, "param", post))
+
+
+@pytest.fixture
+def poster_state(monkeypatch):
+    monkeypatch.delenv("CODE_GAUNTLET_POST_MODE", raising=False)

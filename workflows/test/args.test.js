@@ -1,0 +1,414 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { normalizeArgs, normalizeArgsReport, validateArgs, stripNullOptionalsReport, resolveRemovedTestsArgs } from '../src/args.js';
+import { fnv1a32 } from '../src/wire.js';
+import { nullToleranceGap, nullRespellGap, nullToleranceRejectedKeys } from '../src/args.js';
+import { interactiveArgs, headlessArgs, priorReviewDetector, prIdentity } from './helpers/argsFixtures.js';
+import { CONTEXT_RECEIPT_FIELDS } from '../src/registry.js';
+
+test('preparation receipt owns its declared fields and discloses conflicting top-level values', () => {
+  const receipt = {contextLines:10, contextChars:200, contextMaxLineChars:20, contextReadPlanVersion:1,contextReadChunks:[10],
+    removedTests:{status:'unavailable',items:[],omitted:0,reason:'inventory absent'},
+    discoveryPlanRef:{path:'code-gauntlet-discovery-plan-abc1234.json',sha256:'a'.repeat(64)}};
+  const fields = Object.keys(receipt);
+  assert.deepEqual(new Set(CONTEXT_RECEIPT_FIELDS), new Set(fields));
+  const same = {...receipt,discoveryPlanRef:{sha256:'a'.repeat(64),path:'code-gauntlet-discovery-plan-abc1234.json'}};
+  assert.equal(normalizeArgsReport({...same, contextReceipt:receipt}).contextReceiptGaps, undefined);
+  const report = normalizeArgsReport(Object.fromEntries([...CONTEXT_RECEIPT_FIELDS.map((key) => [key, 0]), ['contextReceipt', receipt]]));
+  assert.equal(report.contextReceiptGaps.length, CONTEXT_RECEIPT_FIELDS.length);
+  for (const key of CONTEXT_RECEIPT_FIELDS) {
+    assert.deepEqual(report.args[key], receipt[key]);
+    assert.ok(report.contextReceiptGaps.some((gap) => gap.startsWith(`contextReceipt.${key} conflicts`)));
+  }
+});
+
+test('removed-test args treat every inventory path control character as unavailable', () => {
+  const controls = [...Array.from({ length: 32 }, (_, i) => i),
+    ...Array.from({ length: 33 }, (_, i) => i + 127), 0x2028, 0x2029];
+  for (const code of controls) {
+    const body = { status: 'available', items: [{ id: '0123456789abcdef',
+      path: `tests/control${String.fromCodePoint(code)}path`, old_start: 1, old_end: 2, kind: 'deleted_file' }], omitted: 0 };
+    const removedTests = { ...body, checksum: fnv1a32(JSON.stringify(body, null, 2)) };
+    assert.deepEqual(resolveRemovedTestsArgs({ removedTests }), {
+      status: 'unavailable', items: [], omitted: 0, reason: 'invalid inventory item',
+    }, `U+${code.toString(16)}`);
+  }
+});
+
+const REJECTION_ROWS = [
+  ...[['python', 'python3;id', 'python3, python, py -3']].map(([key, value, allowed]) => ({
+    name: `${key} allowlist ${value}`, input: (a) => { a[key] = value; }, expected: [`${key} must be one of ${allowed}`],
+  })),
+  { name: 'version', input: (a) => { a.argsVersion = 2; }, expected: [ "unsupported argsVersion 2 (expected 1)" ] },
+  { name: 'mode', input: (a) => { a.mode = "bogus"; }, expected: [
+    "invalid mode: bogus",
+    "configEcho has unexpected key(s): model_tier, delivery_tier, pr_comment_cap",
+  ] },
+  { name: 'nonce', input: (a) => { a.nonce = "n 1"; }, expected: [
+    "invalid nonce: must match /^[A-Za-z0-9._-]+$/ (AST-safe, non-splitting \u2014 interpolated into the verify " +
+      "command argv per slice)",
+  ] },
+  { name: 'agent flags', input: (a) => { a.agentFlags = {}; }, expected: [
+    "agentFlags is no longer accepted \u2014 the pipeline derives dimension flags itself from riskTable/scopeAnswer " +
+      "(issue #24). Stamp riskTable (the Phase 2e per-file risk classification) and, only when the light/full gate " +
+      "asked, scopeAnswer; do not stamp agentFlags.",
+  ] },
+  { name: 'policy provider',
+    input: (a) => { a.policy.provider = "aws"; },
+    expected: [ "invalid policy.provider: aws (expected one of firstParty, bedrock, vertex, foundry)" ] },
+  { name: 'policy tier',
+    input: (a) => { a.policy.tier = "standard"; }, expected: [ "invalid policy.tier: standard (expected optimized)" ] },
+  { name: 'policy gateway',
+    input: (a) => { a.policy.gateway = "true"; }, expected: [ "invalid policy.gateway: true (expected a boolean)" ] },
+  ...[
+    ['unknown alias', ['fable'], 'fable'],
+    ['duplicate alias', ['sonnet', 'sonnet'], 'sonnet,sonnet'],
+    ['non-array aliases', 'sonnet', 'sonnet'],
+  ].map(([name, value, display]) => ({ name,
+    input: (a) => { a.policy.mappedAliases = value; },
+    expected: [`invalid policy.mappedAliases: ${display} (expected distinct values from sonnet, opus, haiku)`] })),
+  { name: 'repoRoot control', input: (a) => { a.repoRoot = "/p\n"; }, expected: [ "repoRoot must not contain a control character" ] },
+  { name: 'headShaShort shell metacharacter', input: (a) => { a.headShaShort = 'abc;id'; }, expected: [
+    "headShaShort must match /^[A-Za-z0-9._-]+$/ (AST-safe, non-splitting \u2014 interpolated into the verify command " +
+      "argv)",
+  ] },
+  { name: 'blank path', input: (a) => { a.diffPath = "   "; }, expected: [ "diffPath must be a non-empty string when present" ] },
+  { name: 'relative output',
+    input: (a) => { a.outputDir = "relative"; }, expected: [ "outputDir must be an absolute confined root without .. segments or backslashes" ] },
+  { name: 'relative plugin root', input: (a) => {
+    a.pluginRoot = 'plugin'; a.verify = { scriptPath: '/untrusted/verify_findings.py' };
+  }, expected: ['pluginRoot must be an absolute confined root without .. segments or backslashes'] },
+  { name: 'root traversal',
+    input: (a) => { a.repoRoot = "/r/../other"; }, expected: [ "repoRoot must be an absolute path without .. segments or backslashes" ] },
+  { name: 'plugin backtick', input: (a) => { a.pluginRoot = "/plugin`root"; }, expected: [ "pluginRoot must not contain a backtick" ] },
+  { name: 'plugin traversal',
+    input: (a) => { a.pluginRoot = "/plugin/../other"; }, expected: [ "pluginRoot must not contain a .. path segment" ] },
+  { name: 'changed files type',
+    input: (a) => { a.changedFiles = {}; }, expected: [ "changedFiles must be an array of repo-relative paths" ] },
+  { name: 'risk container', input: (a) => { a.riskTable = {}; }, expected: [ "riskTable must be an array of {path, risk} objects" ] },
+  { name: 'risk enum',
+    input: (a) => { a.riskTable[0].risk = "bogus"; }, expected: [ "riskTable[0].risk must be one of low, medium, high (got \"bogus\")" ] },
+  { name: 'risk extra',
+    input: (a) => { a.riskTable[0].note = 1; }, expected: [ "riskTable[0] has unexpected key(s): note (only path and risk are allowed)" ] },
+  { name: 'risk missing path',
+    input: (a) => { a.changedFiles.push("b.js"); }, expected: [ "riskTable is missing risk classification for changed file(s): b.js" ] },
+  { name: 'risk surplus path',
+    input: (a) => { a.riskTable.push({ path: "ghost.js", risk: "low" }); },
+    expected: [ "riskTable classifies file(s) not present in changedFiles: ghost.js" ] },
+  { name: 'scope enum',
+    input: (a) => { a.scopeAnswer = "partial"; }, expected: [ "invalid scopeAnswer: partial (expected one of light, full)" ] },
+  { name: 'eligible missing answer', input: (a) => { a.riskTable[0].risk = "low"; }, expected: [
+    "riskTable/changedLines are light-eligible but scopeAnswer is missing \u2014 the light/full gate must have asked, " +
+      "and its answer must be stamped as scopeAnswer",
+  ] },
+  { name: 'contextLines ceiling',
+    input: (a) => { a.contextLines = 5000001; },
+    expected: [ "contextLines is 5000001, above the 5000000 ceiling \u2014 that is not a review context, it is a mis-measurement" ] },
+  { name: 'delivery tier', input: (a) => { a.delivery = { tier: "suggestions_only" }; }, expected: [
+    "invalid delivery.tier: suggestions_only (expected one of all, main_only)",
+    "delivery.tier does not match configEcho.delivery_tier",
+  ] },
+  { name: 'identity pr_number', input: (a) => {
+    a.delivery = { prIdentity: prIdentity() };
+    a.delivery.prIdentity.pr_number = 0;
+  }, expected: [ "delivery.prIdentity.pr_number must be a positive safe integer" ] },
+  { name: 'identity sha_full', input: (a) => {
+    a.delivery = { prIdentity: prIdentity() };
+    a.delivery.prIdentity.sha_full = "D".repeat(40);
+  }, expected: [ "delivery.prIdentity.sha_full must be a 40-character lowercase hex commit id" ] },
+  { name: 'identity web_origin', input: (a) => {
+    a.delivery = { prIdentity: prIdentity() };
+    a.delivery.prIdentity.web_origin = "github.com";
+  }, expected: [ "delivery.prIdentity.web_origin must be an http(s) URL without userinfo (normalized to its origin)" ] },
+  { name: 'identity repo slash',
+    input: (a) => { a.delivery = { prIdentity: prIdentity() }; a.delivery.prIdentity.repo = "a/b"; },
+    expected: [ "delivery.prIdentity.repo must not contain \"/\"" ] },
+  { name: 'identity required missing', input: (a) => {
+    a.delivery = { prIdentity: prIdentity() };
+    delete a.delivery.prIdentity.platform;
+  }, expected: [ "delivery.prIdentity.platform must be one of github, gitlab" ] },
+  { name: 'persist returns',
+    input: (a) => { a.persist = { returnPrimaries: "false" }; }, expected: [ "persist.returnPrimaries must be a boolean when present" ] },
+  { name: 'persist shape', input: (a) => { a.persist = []; },
+    expected: ['persist must be an object of the form { returnPrimaries } when present'] },
+  { name: 'limits unknown', input: (a) => { a.limits.verifySclieSize = 50; }, expected: [
+    "unknown limits key: verifySclieSize (expected one of summarizeBucketSize, validateBatch, challengeCap, " +
+      "verifySliceSize, deliveryCap, discoveryCap, maxLineSpan)",
+  ] },
+  { name: 'multi-error limits', input: (a) => {
+    a.limits = { summarizeBucketSize: 0, validateBatch: -1, challengeCap: -1, verifySliceSize: 0,
+    deliveryCap: -1, discoveryCap: 0, maxLineSpan: 0 };
+  }, expected: [
+    "limits.summarizeBucketSize must be a positive safe integer when present",
+    "limits.validateBatch must be a positive safe integer when present",
+    "limits.verifySliceSize must be a positive safe integer when present",
+    "limits.maxLineSpan must be a positive safe integer when present",
+    "limits.challengeCap must be a non-negative safe integer when present",
+    "limits.deliveryCap must be null, absent, or a non-negative safe integer when present",
+    "limits.discoveryCap must be a positive safe integer when present",
+  ] },
+  { name: 'reviewScope extra',
+    input: (a) => { a.reviewScope.reason = "old reason"; }, expected: [ "reviewScope has unexpected key(s): reason" ] },
+  { name: 'scope kind', input: (a) => { a.reviewScope.kind = "bogus"; }, expected: [ "reviewScope.kind must be full or incremental" ] },
+  { name: 'incremental since', input: (a) => {
+    a.reviewScope = { requested: "incremental", kind: "incremental", since: "abc-1._x", commits: null,
+    detector: priorReviewDetector() }; a.reviewScope.since = "bad sha!";
+  }, expected: [ "reviewScope.since must be a NONCE_RE-safe string for incremental scope" ] },
+  { name: 'incremental unsafe', input: (a) => {
+    a.reviewScope = { requested: "incremental", kind: "incremental", since: "abc-1._x", commits: null,
+    detector: priorReviewDetector() }; a.reviewScope.detector.incremental_safe = false;
+  }, expected: [ "reviewScope.kind incremental requires detector.incremental_safe true" ] },
+  { name: 'full fallback',
+    input: (a) => { a.reviewScope.requested = "incremental"; },
+    expected: [ "reviewScope full fallback requires detector facts when incremental was requested" ] },
+  { name: 'detector extra',
+    input: (a) => { a.reviewScope.detector = priorReviewDetector({ extra: true }); },
+    expected: [ "reviewScope.detector has unexpected key(s): extra" ] },
+  { name: 'detector missing', input: (a) => {
+    a.reviewScope.detector = priorReviewDetector(); delete a.reviewScope.detector.error;
+  }, expected: [
+    "reviewScope.detector is missing key(s): error",
+    "reviewScope.detector.error must be a string or null",
+  ] },
+  { name: 'detector previously_reviewed',
+    input: (a) => { a.reviewScope.detector = priorReviewDetector({ previously_reviewed: "no" }); },
+    expected: [ "reviewScope.detector.previously_reviewed must be a boolean" ] },
+  { name: 'headless cap absent', base: headlessArgs,
+    input: (a) => { delete a.limits.deliveryCap; },
+    expected: [ "headless limits.deliveryCap must be a number matching configEcho.pr_comment_cap" ] },
+  { name: 'interactive cap null mismatch',
+    input: (a) => { a.limits.deliveryCap = null; a.configEcho.pr_comment_cap.value = "5"; },
+    expected: [ "configEcho.pr_comment_cap must be null when limits.deliveryCap is absent or null" ] },
+  { name: 'tier malformed receipt', base: headlessArgs, input: (a) => {
+    a.delivery.tier = "main_only"; a.configEcho.delivery_tier.source = "fixed";
+  }, expected: [ "configEcho.delivery_tier.source is invalid for headless" ] },
+  { name: 'two scope refusals', base: headlessArgs, input: (a) => {
+    a.scopeAnswer = "full"; a.configEcho.trivial_scope.value = "light";
+  }, expected: [
+    "scopeAnswer is \"full\" but the riskTable/changedLines are not light-eligible (not every file is low risk, or " +
+      "changedLines >= 50) \u2014 the orchestrator answered a light/full question the gate never asked; omit scopeAnswer",
+    "configEcho.trivial_scope is \"light\" but the riskTable/changedLines are not light-eligible (not every file is" +
+      " low risk, or changedLines >= 50) \u2014 the orchestrator answered a light/full question the gate never asked",
+  ] },
+  { name: 'PR comments identity', base: headlessArgs,
+    input: (a) => { a.configEcho.delivery.value = "pr_comments"; },
+    expected: [ "delivery.prIdentity is required when configEcho.delivery contains pr_comments" ] },
+  { name: 'malformed cap keeps later lockstep', base: headlessArgs, input: (a) => {
+    a.limits.deliveryCap = 1; a.configEcho.pr_comment_cap.value = '007';
+    a.reviewScope.requested = 'incremental';
+  }, expected: [
+    'configEcho.pr_comment_cap.value is invalid for headless',
+    'reviewScope.requested does not match configEcho.reviewed_policy',
+  ] },
+  { name: 'headless answer lockstep', base: headlessArgs, input: (a) => {
+    a.riskTable[0].risk = "low"; a.scopeAnswer = "full"; a.configEcho.trivial_scope.value = "light";
+  }, expected: [ "scopeAnswer does not match configEcho.trivial_scope" ] },
+  { name: 'required limits remains absent', base: headlessArgs,
+    input: (a) => { delete a.limits; },
+    expected: [ "missing required field: limits" ], normalize: true, check: (out) => { assert.equal("limits" in out, false); } },
+  { name: 'null model receipt stays null', input: (a) => { a.configEcho.model_tier.value = null; },
+    expected: ['configEcho.model_tier.value must be a string'], normalize: true,
+    check: (out) => { assert.equal(out.configEcho.model_tier.value, null); } },
+ ];
+for (const { name, input, expected, base = interactiveArgs, normalize, check } of REJECTION_ROWS) {
+  test(`validate: ${name}`, () => {
+    const args = base();
+    input(args);
+    const out = normalize ? normalizeArgs(args) : args;
+    assert.deepEqual(validateArgs(out), { ok: false, errors: expected });
+    if (check) check(out);
+  });
+}
+
+const NON_OBJECT_ROWS = [
+  { name: 'string', input: 'waist', expected: { ok: false, errors: ['args is not an object'] } },
+];
+for (const { name, input, expected } of NON_OBJECT_ROWS) {
+  test(`validate scalar: ${name}`, () => assert.deepEqual(validateArgs(input), expected));
+}
+
+const ACCEPTANCE_ROWS = [
+  { name: 'drive roots and host selections', input: () => interactiveArgs({
+    repoRoot: 'D:/repo', outputDir: 'D:/repo/.code-gauntlet', pluginRoot: 'C:/plug in', python: 'py -3',
+  }), expected: { ok: true, errors: [] } },
+  { name: 'local scope ignores policy lockstep', input: () => headlessArgs('incremental', { detector: null }),
+    expected: { ok: true, errors: [] } },
+  { name: 'optional domains', input: () => interactiveArgs({
+    nonce: 'n-1.0_ab', policy: { tier: 'optimized', provider: null, gateway: null },
+    contextLines: 5000000, contextChars: 500000000,
+    limits: { challengeCap: 0, deliveryCap: null, discoveryCap: 1 },
+  }), expected: { ok: true, errors: [] } },
+  { name: 'incremental', input: () => interactiveArgs({
+    reviewScope: { requested: 'incremental', kind: 'incremental', since: 'abc-1._x', commits: 0, detector: priorReviewDetector() },
+  }), expected: { ok: true, errors: [] } },
+  { name: 'single-line detector failure', input: () => headlessArgs('incremental', {
+    requested: 'incremental', kind: 'full', since: null, commits: null,
+    detector: priorReviewDetector({ head_advanced: false, error: 'fetch failed' }),
+  }), expected: { ok: true, errors: [] } },
+  { name: 'scripts at root', input: () => interactiveArgs({
+    pluginRoot: '/', persist: { assembleScriptPath: '/scripts/assemble_artifacts.py' },
+    verify: { scriptPath: '/scripts/verify_findings.py' },
+  }), expected: { ok: true, errors: [] } },
+  { name: 'IPv6 identity', input: () => interactiveArgs({ delivery: { prIdentity: {
+    owner: 'o', repo: 'r', pr_number: 310, sha_full: 'dddddddddddddddddddddddddddddddddddddddd',
+    platform: 'gitlab', web_origin: 'http://[::1]:8443', title: 'A useful title',
+  } } }), expected: { ok: true, errors: [] } },
+];
+for (const { name, input, expected } of ACCEPTANCE_ROWS) {
+  test(`accept: ${name}`, () => assert.deepEqual(validateArgs(input()), expected));
+}
+
+const REQUIRED_ROWS = [
+  { name: 'ordered inventory', input: { argsVersion: 1 }, expected: { ok: false, errors: [
+    'missing required field: mode', 'missing required field: repoRoot', 'missing required field: outputDir',
+    'missing required field: headShaShort', 'missing required field: nonce', 'missing required field: generatedAt',
+    'missing required field: diffPath', 'missing required field: changedFiles', 'missing required field: changedLines',
+    'missing required field: riskTable', 'missing required field: policy', 'missing required field: limits',
+    'missing required field: configEcho', 'missing required field: pluginRoot', 'missing required field: reviewScope',
+  ] } },
+];
+for (const { name, input, expected } of REQUIRED_ROWS) {
+  test(`required: ${name}`, () => assert.deepEqual(validateArgs(input), expected));
+}
+
+const STRIP_ROWS = [
+  { name: 'optional inventory', input: {
+    delivery: null, checkpoints: null, persist: null, scopeAnswer: null,
+  }, expected: { args: {}, dropped: [
+    'delivery', 'checkpoints', 'persist', 'scopeAnswer',
+  ], respelled: [] } },
+  { name: 'nested inventory', input: { delivery: { tier: null, prIdentity: null } },
+    expected: { args: { delivery: {} }, dropped: ['delivery.prIdentity', 'delivery.tier'], respelled: [] } },
+  { name: 'interactive null receipt', input: {
+    mode: 'interactive', configEcho: { pr_comment_cap: { value: null, source: 'default' } },
+  }, expected: { args: { mode: 'interactive', configEcho: { pr_comment_cap: { value: 'null', source: 'default' } } },
+    dropped: [], respelled: ['configEcho.pr_comment_cap.value'] } },
+];
+for (const { name, input, expected } of STRIP_ROWS) {
+  test(`strip: ${name}`, () => {
+    const before = structuredClone(input);
+    assert.deepEqual(stripNullOptionalsReport(input), expected);
+    assert.deepEqual(input, before);
+  });
+}
+
+const NORMALIZE_ROWS = [
+  { name: 'JSON null', input: () => '{"delivery":null}',
+    expected: { args: {}, dropped: ['delivery'], respelled: [], derivedPaths: [] } },
+  { name: 'null cap derivation', input: () => ({
+    mode: 'interactive', limits: {}, configEcho: { pr_comment_cap: { value: 'null', source: 'default' } },
+  }), expected: { args: {
+    mode: 'interactive', limits: {
+      summarizeBucketSize: 20, validateBatch: 25, verifySliceSize: 25, maxLineSpan: 100, deliveryCap: null,
+    }, configEcho: {
+      pr_comment_cap: { value: 'null', source: 'default' },
+    },
+  }, dropped: [], respelled: [], derivedPaths: ['limits.deliveryCap'] } },
+];
+for (const { name, input, expected } of NORMALIZE_ROWS) {
+  test(`normalize: ${name}`, () => {
+    const raw = input();
+    const before = structuredClone(raw);
+    assert.deepEqual(normalizeArgsReport(raw), expected);
+    assert.deepEqual(normalizeArgs(raw), expected.args);
+    assert.deepEqual(raw, before);
+  });
+}
+
+const POLICY_DERIVE_ROWS = [
+  { name: 'skip mapped', input: 'skip', expected: 'full' },
+];
+for (const { name, input, expected } of POLICY_DERIVE_ROWS) {
+  test(`policy derivation: ${name}`, () => {
+    const args = headlessArgs(input);
+    delete args.reviewScope.requested;
+    const before = structuredClone(args);
+    assert.equal(normalizeArgs(args).reviewScope.requested, expected);
+    assert.deepEqual(args, before);
+  });
+}
+
+const SCOPE_DERIVE_ROWS = [
+  { name: 'light', input: 'light', expected: { answer: 'light', drops: ['scopeAnswer'],
+    paths: ['delivery.tier', 'scopeAnswer'], rejected: [], result: { ok: true, errors: [] } } },
+];
+for (const { name, input, expected } of SCOPE_DERIVE_ROWS) {
+  test(`scope derivation: ${name}`, () => {
+    const args = headlessArgs();
+    args.riskTable[0].risk = 'low';
+    args.scopeAnswer = null;
+    args.configEcho.trivial_scope.value = input;
+    const report = normalizeArgsReport(args);
+    assert.deepEqual({ answer: report.args.scopeAnswer, drops: report.dropped, paths: report.derivedPaths,
+      rejected: nullToleranceRejectedKeys(report.args, report.dropped, report.derivedPaths), result: validateArgs(report.args) }, expected);
+  });
+}
+
+const NULL_PROBE_ROWS = [
+  { name: 'null identity rejected', input: ['delivery.prIdentity'], derived: [], expected: ['delivery.prIdentity'] },
+];
+for (const { name, input, derived, expected } of NULL_PROBE_ROWS) {
+  test(`null probe: ${name}`, () => {
+    const args = interactiveArgs();
+    const before = structuredClone(args);
+    assert.deepEqual(nullToleranceRejectedKeys(args, input, derived), expected);
+    assert.deepEqual(args, before);
+  });
+}
+
+const GAP_ROWS = [
+  { name: 'respelling', input: 'pr_comment_cap', respell: true, expected:
+    'null_receipt: args.pr_comment_cap arrived as a literal null and was spelled as the printed ' +
+      'token "null"; the receipt and the configuration are unchanged; stamp the string "null".' },
+
+];
+for (const { name, input, respell, expected } of GAP_ROWS) {
+  test(`gap: ${name}`, () => assert.equal(respell ? nullRespellGap(input) : nullToleranceGap(input), expected));
+}
+
+const VALIDATION_BOUNDARY_ROWS = [
+  { name: 'zero cap mismatch', input: () => {
+    const a = interactiveArgs(); a.limits.deliveryCap = 0; return a;
+  }, expected: { ok: false, errors: ['limits.deliveryCap does not match configEcho.pr_comment_cap'] } },
+  { name: 'invalid interactive cap receipt', input: () => {
+    const a = interactiveArgs(); a.configEcho.pr_comment_cap.value = '00'; return a;
+  }, expected: { ok: false, errors: ['configEcho.pr_comment_cap.value is invalid for interactive'] } },
+  { name: 'zero numeric receipt', input: () => {
+    const a = interactiveArgs(); a.limits.deliveryCap = 0; a.configEcho.pr_comment_cap = { value: '0', source: 'env' }; return a;
+  }, expected: { ok: true, errors: [] } },
+  { name: 'PR comments complete identity', input: () => {
+    const a = headlessArgs();
+    a.configEcho.delivery.value = 'chat,pr_comments,markdown';
+    a.delivery.prIdentity = { owner: 'o', repo: 'r', pr_number: 1, sha_full: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      platform: 'github', web_origin: 'https://github.com' };
+    return a;
+  }, expected: { ok: true, errors: [] } },
+];
+for (const { name, input, expected } of VALIDATION_BOUNDARY_ROWS) {
+  test(`validate boundary: ${name}`, () => assert.deepEqual(validateArgs(input()), expected));
+}
+
+for (const [url, origin] of [
+  ['https://github.com/grafana/grafana', 'https://github.com'],
+  ['https://github.com/o/r/pull/9?view=files#diff', 'https://github.com'],
+  ['HTTP://Git.Example:8443?query#fragment', 'http://git.example:8443'],
+  ['https://[::1]:8443/o/r', 'https://[::1]:8443'],
+]) test(`identity URL normalizes before downstream use: ${url}`, () => {
+  const raw = interactiveArgs({ delivery: { prIdentity: { ...prIdentity(), web_origin: url } } });
+  assert.deepEqual(validateArgs(raw), { ok: true, errors: [] });
+  const normalized = normalizeArgs(raw);
+  assert.equal(normalized.delivery.prIdentity.web_origin, origin);
+  assert.equal(raw.delivery.prIdentity.web_origin, url);
+  assert.deepEqual(normalizeArgs(normalized), normalized);
+});
+
+for (const url of ['https://user:pass@github.com/o/r', 'https://user@github.com',
+  'ftp://github.com/o/r', '//github.com/o/r', 'https://github.com:65536/o/r',
+  'https://github.com\\@evil.com/o/r', 'https://github.com\n/o/r']) {
+  test(`identity URL refuses unsafe authority: ${JSON.stringify(url)}`, () => {
+    const args = normalizeArgs(interactiveArgs({ delivery: { prIdentity: { ...prIdentity(), web_origin: url } } }));
+    assert.deepEqual(validateArgs(args).errors, [
+      'delivery.prIdentity.web_origin must be an http(s) URL without userinfo (normalized to its origin)',
+    ]);
+  });
+}

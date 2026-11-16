@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""Fake ``claude`` binary for invoke.py tests. Placed on PATH as ``claude``.
+
+Behavior is selected by env ``FAKE_CLAUDE_MODE``:
+  ok             -> canned resolver "Headless config:" echo + a success result
+                    envelope (total_cost_usd 1.23, modelUsage, usage, empty
+                    permission_denials), and a fake post-review-payload.json under
+                    $CODE_GAUNTLET_OUTPUT_DIR.
+  hang           -> record our process-group id, then sleep well past any test timeout.
+  asks           -> echo + envelope whose permission_denials names AskUserQuestion.
+  badecho        -> partial echo (missing trivial_scope) in BOTH stdout and the envelope
+                    .result -> a partial receipt is never accepted. + normal envelope + payload.
+  echo_in_result -> NO echo in stdout; the full block lives only in the envelope .result
+                    (models a ``-p --output-format json`` run). + payload.
+  echo_in_report -> NO echo in stdout or .result; the full block lives only in a collected
+                    report .md under $CODE_GAUNTLET_OUTPUT_DIR. + payload.
+  mutate_repo    -> write to FAKE_CLAUDE_MUTATE_PATH (inside the plugin repo), then behave
+                    like ``ok`` — models a child self-healing the plugin mid-run.
+  wrong_plugin_echo -> full knobs + stale identity (wrong plugin_root/pipeline_version) + payload.
+  wrong_script_path -> clean echo identity + stale Workflow scriptPath record + payload.
+  no_identity_echo -> full knob echo without pipeline_version/plugin_root + payload.
+  bg_killed      -> the CLI background-task kill notice ahead of a clean envelope; no echo
+                    anywhere and no payload.
+  all_degraded   -> normal echo + an all-degraded failure record; no payload.
+  all_degraded_gap_only -> normal echo + a gap-only all-degraded failure record; no payload.
+  pipeline_failed -> normal echo + a non-degraded failure record; no payload.
+  by_name_record -> normal echo + a successful session-style Workflow record + payload.
+  all_degraded_then_ok -> failure and successful records + payload.
+  all_degraded_stale_script -> an all-degraded record from a stale plugin path.
+  all_degraded_no_echo -> an all-degraded record without any echo; no payload.
+
+All CLI args are ignored for behavior selection. If FAKE_CLAUDE_PIDFILE is set, the
+process-group id is written there at startup so the watchdog test can prove the group was
+killed. If FAKE_CLAUDE_ARGV_FILE is set, the review invocation's argv is recorded there
+(one arg per line) so a test can assert the exact ``-p`` command the runner built -- the
+``--version`` preflight probe does not record (it returns before reaching main's body).
+
+If FAKE_CLAUDE_ENV_FILE is set, a JSON ``{var: bool}`` map of which credential env vars
+this process actually RECEIVED is recorded there -- the only way to prove across the
+subprocess boundary that ``--child-auth subscription`` really kept the higher-precedence
+credentials away from the child, rather than merely that build_env's return value omitted
+them. Presence only, never values: a developer running the suite with a real key exported
+must not have it written to a temp file.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+
+
+def _plugin_dir_from_argv():
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--plugin-dir" and i + 1 < len(args):
+            return args[i + 1]
+    return os.environ.get("FAKE_CLAUDE_PLUGIN_ROOT", "")
+
+
+def _pipeline_version(plugin_dir):
+    override = os.environ.get("FAKE_CLAUDE_PIPELINE_VERSION")
+    if override:
+        return override
+    path = os.path.join(plugin_dir, "workflows", "pipeline.js")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return "0.0.0"
+    m = re.search(r"const\s+PIPELINE_VERSION\s*=\s*['\"]([^'\"]+)['\"]", text)
+    return m.group(1) if m else "0.0.0"
+
+
+def _pipeline_workflow_name(plugin_dir):
+    path = os.path.join(plugin_dir, "workflows", "src", "pipeline_entry.js")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    match = re.search(
+        r"export\s+const\s+meta\s*=\s*\{\s*name:\s*['\"]([^'\"]+)['\"]",
+        text,
+    )
+    return match.group(1) if match else None
+
+
+def _pipeline_script(plugin_dir):
+    path = os.path.join(plugin_dir, "workflows", "pipeline.js")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _session_workflow_script_path(config_dir):
+    claude_home = os.path.dirname(config_dir)
+    return os.path.join(
+        claude_home,
+        "projects",
+        "fake",
+        "sess",
+        "workflows",
+        "scripts",
+        "code-gauntlet-pipeline-wf_1.js",
+    )
+
+
+def echo_lines(plugin_root=None, pipeline_version=None):
+    plugin_root_from_argv = _plugin_dir_from_argv()
+    if plugin_root_from_argv and plugin_root_from_argv not in sys.path:
+        sys.path.insert(0, plugin_root_from_argv)
+    from bench.runner import invoke
+
+    root = plugin_root if plugin_root is not None else plugin_root_from_argv
+    ver = pipeline_version if pipeline_version is not None else _pipeline_version(root)
+    return [
+        "Headless config:",
+        *[
+            f"  {key}={entry['value']} ({entry['source']})"
+            for key, entry in invoke.EXPECTED_ECHO_RECEIPT.items()
+        ],
+        f"  pipeline_version={ver} (bundle)",
+        f"  plugin_root={root} (resolved)",
+    ]
+
+
+def _envelope(
+    permission_denials, result_text="Review complete. 3 findings posted (dry-run)."
+):
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 7,
+        "result": result_text,
+        "total_cost_usd": 1.23,
+        "modelUsage": {
+            "claude-opus-4-8": {
+                "inputTokens": 1200,
+                "outputTokens": 800,
+                "cacheReadInputTokens": 400,
+                "cacheCreationInputTokens": 100,
+                "costUSD": 1.23,
+            }
+        },
+        "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 800,
+            "cache_read_input_tokens": 400,
+            "cache_creation_input_tokens": 100,
+        },
+        "permission_denials": permission_denials,
+        "duration_ms": 41230,
+        "session_id": "fake-session-0001",
+    }
+
+
+def _write_payload():
+    output_dir = os.environ.get("CODE_GAUNTLET_OUTPUT_DIR")
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    payload = {
+        "platform": "github",
+        "endpoint": "repos/o/r/pulls/5/reviews",
+        "method": "POST",
+        "payload": {
+            "event": "COMMENT",
+            "body": "deep-review (dry-run)",
+            "comments": [
+                {"path": "a.py", "line": 10, "body": "Possible null deref."},
+                {"path": "a.py", "line": 22, "body": "Unbounded loop."},
+                {"path": "b.py", "line": 5, "body": "Missing error check."},
+            ],
+        },
+        "skipped": [],
+    }
+    with open(
+        os.path.join(output_dir, "post-review-payload.json"), "w", encoding="utf-8"
+    ) as fh:
+        json.dump(payload, fh)
+
+
+def _record_pgid():
+    pidfile = os.environ.get("FAKE_CLAUDE_PIDFILE")
+    if pidfile:
+        with open(pidfile, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpgrp()))
+
+
+def _mutate_repo():
+    """Write to a path inside the plugin repo — models a child self-healing the plugin
+    mid-run (the contamination the invoke.py integrity guard must catch and reset).
+    The target path is given by FAKE_CLAUDE_MUTATE_PATH."""
+    path = os.environ.get("FAKE_CLAUDE_MUTATE_PATH")
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("// self-healed by child mid-run\n")
+
+
+def _record_argv():
+    argv_file = os.environ.get("FAKE_CLAUDE_ARGV_FILE")
+    if argv_file:
+        with open(argv_file, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(sys.argv[1:]))
+
+
+# Every credential env var the auth precedence chain can resolve, recorded as present or
+# absent so a test can assert the child's own view of it.
+_CREDENTIAL_VARS = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
+
+
+def _record_credential_env():
+    env_file = os.environ.get("FAKE_CLAUDE_ENV_FILE")
+    if not env_file:
+        return
+    seen = {name: bool(os.environ.get(name)) for name in _CREDENTIAL_VARS}
+    with open(env_file, "w", encoding="utf-8") as fh:
+        json.dump(seen, fh)
+
+
+def _write_report(lines):
+    """Write a report .md carrying the echo block in its methodology section."""
+    output_dir = os.environ.get("CODE_GAUNTLET_OUTPUT_DIR")
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    body = ["# Deep Review Report", "", "## Methodology", "", "```", *lines, "```", ""]
+    with open(
+        os.path.join(output_dir, "code-gauntlet-report-fake.md"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write("\n".join(body) + "\n")
+
+
+def _plant_stale_workflow_record():
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        base = config_dir
+    else:
+        home = os.environ.get("HOME")
+        if not home:
+            return
+        base = os.path.join(home, "config")
+    wf_dir = os.path.join(base, "projects", "fake", "sess", "workflows")
+    os.makedirs(wf_dir, exist_ok=True)
+    path = os.path.join(wf_dir, "wf_stale.json")
+    stale = "/home/ubuntu/.claude/plugins/cache/stale/workflows/pipeline.js"
+    # FAKE_CLAUDE_WF_NESTED=1 plants scriptPath under an input wrapper (mirrors
+    # check.py's accepted nested Workflow-tool record shape).
+    if os.environ.get("FAKE_CLAUDE_WF_NESTED") == "1":
+        payload = {"runId": "wf_stale", "input": {"scriptPath": stale}}
+    else:
+        payload = {"runId": "wf_stale", "scriptPath": stale}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+
+def _write_workflow_record(
+    name,
+    result,
+    script_path=None,
+    args_as_json=False,
+    workflow_name=None,
+    script=None,
+):
+    """Write a realistic Workflow record for pipeline-envelope classification tests."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config_dir:
+        return
+    wf_dir = os.path.join(config_dir, "projects", "fake", "sess", "workflows")
+    os.makedirs(wf_dir, exist_ok=True)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    plugin_dir = _plugin_dir_from_argv()
+    args = {
+        "outputDir": os.environ.get("CODE_GAUNTLET_OUTPUT_DIR", ""),
+        "nonce": "fake",
+        "repoRoot": os.getcwd(),
+    }
+    record = {
+        "runId": name,
+        "taskId": f"task-{name}",
+        "startTime": now,
+        "timestamp": now,
+        "status": "completed",
+        "scriptPath": script_path
+        or os.path.join(_plugin_dir_from_argv(), "workflows", "pipeline.js"),
+        "workflowName": (
+            workflow_name
+            if workflow_name is not None
+            else _pipeline_workflow_name(plugin_dir)
+        ),
+        "script": script if script is not None else _pipeline_script(plugin_dir),
+        "args": json.dumps(args) if args_as_json else args,
+        "result": result,
+    }
+    with open(os.path.join(wf_dir, f"{name}.json"), "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+
+
+def _all_degraded_result():
+    return {
+        "ok": False,
+        "error": (
+            "all-degraded: every active discovery dimension degraded - no review was "
+            "performed"
+        ),
+        "gaps": [
+            "all-degraded: every active discovery dimension degraded (bug, security)"
+        ],
+        "phaseReached": "discover",
+        "failingPhase": "discover",
+        "artifactPaths": {},
+        "stats": {"degraded": ["bug", "security"]},
+        "resolvedPolicy": {"provider": "firstParty"},
+    }
+
+
+def main():
+    # A --version probe (the v3 preflight) prints only the version and exits, before any
+    # mode handling -- so it never records a pgid, hangs, or emits a review envelope. The
+    # default clears V3_MIN_CLAUDE_VERSION; FAKE_CLAUDE_VERSION can drive an older CLI.
+    if "--version" in sys.argv:
+        version = os.environ.get("FAKE_CLAUDE_VERSION", "2.1.154")
+        sys.stdout.write(f"{version} (Claude Code)\n")
+        return
+
+    _record_pgid()
+    _record_argv()
+    _record_credential_env()
+    mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
+
+    if mode == "mutate_repo":
+        # Write into the plugin repo, then otherwise behave like a normal 'ok' run so the
+        # only anomaly is the dirty repo — exactly the self-healing-child contamination.
+        _mutate_repo()
+        mode = "ok"
+
+    if mode == "hang":
+        time.sleep(60)
+        return
+
+    if mode == "wrong_plugin_echo":
+        ECHO_LINES = echo_lines(
+            plugin_root="/stale/plugin/cache/code-gauntlet",
+            pipeline_version="2.6.0",
+        )
+    else:
+        ECHO_LINES = echo_lines()
+
+    partial_lines = [ln for ln in ECHO_LINES if "trivial_scope" not in ln]
+    no_identity_lines = [
+        ln
+        for ln in ECHO_LINES
+        if "pipeline_version=" not in ln and "plugin_root=" not in ln
+    ]
+
+    # Where the receipt lands: stdout lines, the envelope .result text, a report .md.
+    stdout_lines = ECHO_LINES
+    result_text = "Review complete. 3 findings posted (dry-run)."
+    write_report = False
+
+    if mode == "badecho":
+        # A partial block (missing trivial_scope) in BOTH stdout and .result.
+        stdout_lines = partial_lines
+        result_text = "\n".join(partial_lines)
+    elif mode == "no_identity_echo":
+        # Full knob receipt, but no identity lines: config echo passes, identity guard fails.
+        stdout_lines = no_identity_lines
+        result_text = "\n".join(no_identity_lines)
+    elif mode == "echo_in_result":
+        # Receipt only in the final message (.result), never in intermediate stdout.
+        stdout_lines = []
+        result_text = "\n".join(ECHO_LINES)
+    elif mode == "echo_in_report":
+        # Receipt only in the collected report markdown.
+        stdout_lines = []
+        write_report = True
+    elif mode == "bg_killed":
+        # The Phase 3 Workflow ran detached and the CLI killed it at its background-wait
+        # ceiling before Phase 8 -- so NO echo anywhere and no payload. The kill notice
+        # precedes a clean (is_error:false) envelope whose .result is a "still running in
+        # the background" message. Models the smoke-run workflow_backgrounded failure.
+        stdout_lines = []
+        result_text = (
+            "The deep-review workflow is now running in the background; "
+            "I'll pick up the persisted artifacts for delivery once it completes."
+        )
+    elif mode == "wrong_script_path":
+        _plant_stale_workflow_record()
+
+    if mode in (
+        "all_degraded",
+        "all_degraded_gap_only",
+        "pipeline_failed",
+        "by_name_record",
+        "all_degraded_then_ok",
+        "all_degraded_stale_script",
+        "all_degraded_no_echo",
+    ):
+        if mode == "all_degraded_gap_only":
+            result = _all_degraded_result()
+            result["error"] = "pipeline failed"
+            _write_workflow_record("wf_gap_only", result, args_as_json=True)
+        elif mode == "pipeline_failed":
+            _write_workflow_record(
+                "wf_pipeline_failed",
+                {
+                    "ok": False,
+                    "error": "checkpoint-shape: phases.filter is not an object",
+                    "failingPhase": "checkpoints",
+                    "artifactPaths": {},
+                },
+            )
+        elif mode == "by_name_record":
+            _write_workflow_record(
+                "wf_by_name",
+                {"ok": True, "phaseReached": "report"},
+                script_path=_session_workflow_script_path(
+                    os.environ.get("CLAUDE_CONFIG_DIR", "")
+                ),
+            )
+        elif mode == "all_degraded_then_ok":
+            _write_workflow_record("wf_alldeg", _all_degraded_result())
+            _write_workflow_record(
+                "wf_resume",
+                {
+                    "ok": True,
+                    "phaseReached": "report",
+                    "artifactPaths": {"report": "report.md"},
+                },
+            )
+        elif mode == "all_degraded_stale_script":
+            _write_workflow_record(
+                "wf_stale_alldeg",
+                _all_degraded_result(),
+                script_path="/home/ubuntu/.claude/plugins/cache/stale/workflows/pipeline.js",
+                workflow_name="stale-plugin-pipeline",
+            )
+        else:
+            _write_workflow_record(
+                "wf_alldeg",
+                _all_degraded_result(),
+            )
+        if mode == "all_degraded_no_echo":
+            stdout_lines = []
+            result_text = "Pipeline did not complete."
+
+    denials = []
+    if mode == "asks":
+        denials = [
+            {
+                "tool_name": "AskUserQuestion",
+                "tool_use_id": "toolu_fake_ask",
+                "reason": "interactive prompt blocked in headless run",
+            }
+        ]
+
+    if mode == "bg_killed":
+        # The CLI's background-task kill notice, printed ahead of the result envelope.
+        sys.stdout.write(
+            "Background tasks still running after 600s; terminating. "
+            "Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.\n"
+        )
+    if stdout_lines:
+        sys.stdout.write("\n".join(stdout_lines) + "\n")
+    if mode not in (
+        "asks",
+        "bg_killed",
+        "all_degraded",
+        "all_degraded_gap_only",
+        "pipeline_failed",
+        "all_degraded_stale_script",
+        "all_degraded_no_echo",
+    ):
+        _write_payload()
+    if write_report:
+        _write_report(ECHO_LINES)
+    sys.stdout.write(json.dumps(_envelope(denials, result_text)) + "\n")
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

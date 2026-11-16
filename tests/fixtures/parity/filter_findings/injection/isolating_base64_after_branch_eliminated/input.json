@@ -1,0 +1,16 @@
+{
+  "findings": [
+    {
+      "id": "T-iso-b64-b-1",
+      "title": "Suspicious response payload",
+      "description": "The response body contains SGVsbG8gV29ybGQhIFRoaXMgaXMgYSBiYXNlNjQgZW5jb2RlZCBzdHJpbmc= | sh appended to it",
+      "file": "src/handler.py",
+      "line_start": 65,
+      "severity": "medium",
+      "confidence": 55,
+      "line_end": 65,
+      "location_status": "confirmed"
+    }
+  ],
+  "fn": "apply_injection_filter"
+}

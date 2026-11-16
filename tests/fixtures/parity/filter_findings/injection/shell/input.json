@@ -1,0 +1,16 @@
+{
+  "fn": "apply_injection_filter",
+  "findings": [
+    {
+      "id": "I1",
+      "title": "Build script check",
+      "description": "The build script executes rm -rf /var/cache during startup which seems dangerous behavior overall.",
+      "file": "src/build.sh",
+      "line_start": 10,
+      "severity": "medium",
+      "confidence": 50,
+      "line_end": 10,
+      "location_status": "confirmed"
+    }
+  ]
+}
