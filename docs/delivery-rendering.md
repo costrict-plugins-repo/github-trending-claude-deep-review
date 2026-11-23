@@ -1,0 +1,275 @@
+# Delivery Rendering
+
+## Contents
+
+- [Outbound text preparation](#outbound-text-preparation)
+- [Posted body budgets](#posted-body-budgets)
+- [Report display folds](#report-display-folds)
+- [Summary index and host rendering](#summary-index-and-host-rendering)
+
+Code-owned escaping, display folds, and host budgets belong here for maintenance.
+The session passes persisted artifacts to the delivery scripts without reproducing these rules.
+
+A finding with a confirmed or relocated canonical range can carry a source link or inline
+comment. Delivery rechecks its quote against the current diff at that range without searching.
+A qualifying one-line fragment may post inline. Missing, unknown, or unconfirmed location
+status keeps the finding in the review body, labelled `location unconfirmed`, without a source
+link, inline comment, replacement fence, patch artifact, or executable fix task. Legacy numeric
+aliases alone grant no location rights. Fix tasks recheck the quote against the current regular
+source file, including local worktree edits.
+
+Replacement fences and patch artifacts require whole-line equality after stripping each line's
+leading and trailing whitespace. Every canonical line must match its corresponding anchor line.
+The held claimed start and end must be positive safe integers whose span length equals the
+canonical anchor length. A missing held end, a longer original fix span, a proper fragment, or a
+platform-shrunk apply range withholds the replacement code while retaining the prose suggestion.
+
+## Issue grouping
+
+Accepted groups stay indivisible. The shared lead ranking uses severity first, then consequence seriousness, security,
+proven origin, tier, inline placement, file, line, and ID. Confidence and prose length have no role. Posted severity is the
+highest member severity, and any main-tier member makes the whole group main tier. Selection, caps and public counts use
+these group values; findings keep their own assessed severity and tier in checkpoints and the
+local report. Each issue posts its lead sections. Folded security titles appear on one prepared
+`Security claim` line. Additional sites combine other members'
+confirmed ranges and all confirmed sites. Overlapping and adjacent ranges merge; the inline
+range is removed from that coverage. Same-file sites use line references without repeating the
+path. Unanchored groups render once under the lead location. GitLab addenda list only undelivered
+locations. Other member descriptions remain in the local report. A `comment_defect` is report
+only and contributes no posted text or sites.
+
+## Reader statements
+
+Both readers must return `comment`, an object with string `title`, `body` and `fix`, on confirmed
+verdicts. The resolved verdict selects the statement as well as the consequence, including
+challenger recovery after a failed validator. The title is at most 100 Unicode characters and
+the body at most 400; both must be nonblank and the title must be one line. Schema field
+descriptions ask for one title line and one or two body sentences about one confirmed issue,
+its effect and verified conditions, addressed to the PR author. A separate one-sentence `fix`
+names only the confirmed correction, with a 200-character ceiling. Empty or blank fixes render
+no fix line. Missing, malformed or overlong fixes are discarded independently, preserving the
+reader title and body. Older stored comments without `fix` still use their reader statement.
+
+`CONFIRMED_COMMENT_SCHEMA` owns length, pattern and blank checks in code. The agent-facing
+`READER_VERDICT_SCHEMA` (challenger) and `READER_VALIDATION_VERDICT_SCHEMA` (validator) require
+`comment` only for confirmed answers, with required string `title`, `body` and `fix`. These dispatch
+schemas carry no length, pattern or nonblank constraints on those strings. Structural violations
+have the same whole-answer retry exposure as other required fields (see the
+[recorded host probe](research/artifacts/29-workflow-platform-smoke-tests.md)).
+
+`VERDICT_SCHEMA`, `VALIDATION_VERDICT_SCHEMA` and `VERDICT_ENTRY_SCHEMA` read internal or stored
+verdicts and tolerate absent or malformed comment text, including older checkpoints, resumes and
+trace replays. This also preserves fallback when an unchecked return bypasses host enforcement.
+Code discards an invalid title/body statement as a whole, retaining the verdict without retry;
+an invalid fix is discarded on its own.
+Missing or invalid title/body text uses discovery prose and records one `comment_text_fallback` kept decision
+per selected issue in the measurement trace. No text is truncated to meet these bounds.
+
+Posted titles, bodies, summary entries and folded security titles use the resolved statement.
+When that statement is used, **Suggested fix** uses only its `fix`; discovery suggestion prose
+is suppressed even if the reader fix is empty or invalid. A fallback comment keeps discovery
+suggestion prose. Validated replacement fences render independently of this prose selection.
+The report retains discovery descriptions and suggestions. It shows **Confirmed fix** beside the
+confirmed statement for the lead and each grouped member, when the reader supplied a valid fix.
+Reader titles and bodies pass the same elimination checks as discovery title and description.
+Reader fix prose uses the suggestion strip path: a matching fix is dropped without eliminating
+the finding, and its accompanying replacement code is withheld under the same taint rule as
+discovery suggestion prose. All surviving text passes outbound preparation.
+Traces retain the resolved verdict; replay and benchmark delivery reconstruction use the shared
+composer, preserving the actual posted text.
+
+## Outbound text preparation
+
+Every posted text field is prepared before Markdown is assembled. Titles use the single-line class; body and suggestion use multiline prose; the cited
+rule is normalized, redacted, and has backtick runs of three or more collapsed to two
+before its source text is capped at 500 characters. Containment then escapes fence-shaped
+lines and unsafe visible characters before blockquote markers are added. Escaping can make
+the posted rule longer than 500 characters. Display
+locations are quoted with a code-span delimiter longer than any path backtick run. A
+caller-supplied `review_body` without structured summary data runs through the same prose guard. A visible
+ASCII `@` at text start or after a non-alphanumeric character becomes U+FF20 FULLWIDTH COMMERCIAL AT,
+including inside inline code, quoted locations and a URL segment such as `/@name`.
+`<` before an ASCII letter, `/`, `!` or `?` becomes `&lt;` in prose and U+FF1C
+FULLWIDTH LESS-THAN SIGN inside a paired inline span or quoted location. Email address
+syntax stays intact. Outside inline code, display locations and trusted fences, reference
+syntax is broken: `#`, `!` and `&` before an ASCII digit become U+FF03, U+FF01 and U+FF06,
+a word-initial `GH-` before a digit takes U+2011 as its hyphen, and `~` or `%` before an
+ASCII letter, digit, underscore or `"` becomes U+FF5E or U+FF05. Tilde runs stay, and a
+rewritten sigil loses one preceding backslash when its backslash run is odd.
+A URL that starts at line start, after whitespace, or after `*`, `_`, `~`, `(`, `<`
+or a link label's `[`, and every inline link destination, keeps its sigils.
+A github.com or www.github.com URL shaped `/<owner>/<repo>/(issues|pull|discussions)/<digit>`,
+or a URL on any host containing `/-/(issues|merge_requests|work_items|epics|milestones|snippets)/<digit>`,
+becomes inline code, and as a link destination its `(` becomes U+FF08.
+GitHub Enterprise issue URLs are not wrapped.
+Numeric references and `&commat;`, `&excl;`, `&num;`, `&percnt;`, `&lbrack;`, `&lsqb;`,
+`&rsqb;`, `&rbrack;`, `&Hat;`, `&colon;`, `&lpar;`, `&rpar;`, `&bsol;`, `&nbsp;` and
+`&NonBreakingSpace;` decode as each replacement
+is consumed before the next input character. Decimal and hexadecimal accumulation saturates
+at 127; only ASCII values 32 through 126 are emitted. Other named references and query
+ampersands stay literal. Invisible code points, including CR, are discarded before matching;
+TAB and LF remain. Raw U+00A0 and its two named references become plain spaces everywhere,
+including inside inline code and trusted fences, like other decoded references. Text loss
+was measured on GitLab CE 19.4.1 through its Markdown API for a bracket-paren shape holding
+U+00A0 next to `&`, `<` or `>`; the prepared form was measured to show all text.
+The shared vectors pin the bytes. Numeric references to 160 are removed before Markdown
+classification.
+Comments are removed only when a `-->` begins after the end of a live `<!--` opener. An
+overlapping closer in `<!-->tail` stays visible as `&lt;!-->tail`; a later non-overlapping
+closer still removes the comment. Eager reduction can expose text that a stricter reduction order would
+remove: `<!--&#38;#45;&#38;#45;&#38;#62;z-->tail` becomes `z-->tail`,
+`<!--x--` + U+200B + `>y-->z` becomes `y-->z`, and
+`<!-<!--x-->- y --<!--z-->> w` becomes `> w`.
+Secrets are redacted before containment. Inline spans pair on one line at the next exact
+backtick-run length, retrying shorter opener suffixes when a complete run has no mate.
+Only containment and the tilde guard share that span selection (`workflows/src/outboundText.js` for the pipeline Summary). The colon guard is
+span-blind and rewrites inside inline code too.
+A wrong pairing can show literal `&lt;` or backslashes, or show
+fullwidth characters in prose, but leaves the text contained. Fullwidth `＜` and `＠`
+inside code and display locations paste as different characters. Permalink URLs are
+encoded separately and retain the original path.
+
+Body text trusts column-zero backtick and tilde fences. Suggestion text and cited rules pass
+through `prepared_prose`, which collapses backtick runs of three or more to two before fence
+classification. Suggestion text therefore trusts only column-zero tilde fences; cited rules
+trust no fences. Trusted body and suggestion payloads retain normalized and redacted bytes,
+but accepted opener lines lose their entire info string. Finding-marker opening grammar is
+broken across the whole fence, including across newlines. Exact CommonMark
+closers end a trusted fence: up to three spaces of indent, the same fence character and at
+least the opener length, then only spaces or tabs. Every unprotected prose line escapes each
+tilde of a run of three or more outside complete paired inline-code spans. An even preceding
+backslash run gains one slash; an odd run already escapes the first tilde, and the remaining
+tildes each gain a slash. Fully escaped runs are fixed points. Ordinary mid-line `~~~`
+therefore displays as punctuation. Other untrusted backtick fence-shaped lines have their
+first fence character escaped, including lines after bullets or `[0-9]{1,9}[.)]` list
+markers followed by a space or tab. Single-line fields do not track fences or escape tilde
+runs. Summary titles and assembled bullets apply the prose tilde guard, preserving code-owned
+location spans while escaping runs in link destinations. Cited rules trust no fences:
+every backtick fence-shaped rule line has its first fence character escaped, every tilde
+run outside paired inline code is escaped, and every line receives outside-fence
+containment before blockquoting. An unclosed trusted body or suggestion fence gets a
+synthetic closer. A terminated HTML comment inside code is removed before fence or inline
+classification. Fields
+containing only Unicode whitespace are absent; Markdown blank lines still use only
+spaces and tabs.
+
+GitLab (measured on CE 19.4.1) runs a quick action from a posted note when a raw line of a
+top-level paragraph starts with `/` at column zero followed by a command name. The action runs
+with the posting account's permissions, and GitLab deletes the command line from the stored
+note even when it refuses the action. Indented lines, fences, blockquotes, lists, tables and
+mid-line slashes do not run. A multiline quote opener (a line starting with `>>>`, including
+alert openers such as `>>> [!note]`) can close a fenced block early and expose its lines,
+committable suggestion lines included, as prose. So every prepared prose field, on both
+platforms and outside trusted fences, puts a backslash before a line's leading `/` and before
+a run of three or more `>` that starts a line's content after list, quote and indent prefixes.
+The rules run after normalization and redaction. Suggested-fix code inside its suggestion fence
+is unchanged. Single-line fields carry neither escape because they follow a code-owned prefix
+or sit inside a code span. In ordinary prose, CommonMark consumes the escape backslash and
+displays the punctuation as intended. An opener on an indented-code line shows its backslash.
+GitLab CE 19.4.1 passes a backslash inside `$$` display math to its math renderer.
+Nested-quote shorthand such as `>>> text` displays literally.
+
+In prose, inline spans and quoted locations, the bracket after `!` or `[` (also
+across a run of backslashes) becomes U+FF3B FULLWIDTH LEFT SQUARE BRACKET.
+Both hosts render an image from `![`; GitLab also renders one from `[[`.
+So does every `[` before a caret, also across a run of backslashes: GitHub hides text
+between `[^` and a `]` on a later line of the paragraph. A regex such as `[^a-z]` shows
+as `［^a-z]`.
+GitLab parses text holding `](` a second time after backslashes are consumed,
+so a backslash does not hold there. On an unprotected physical line holding `](` or `]\(`,
+every `]` plus zero or more backslashes plus `:` everywhere on that triggered line changes
+only its colon to U+FF1A FULLWIDTH COLON. Named HTML5 forms for the closing bracket, colon,
+parentheses and backslash decode
+before this check. The colon rule is span-blind and applies inside inline code and to location
+paths because a platform can assign a backtick to another construct. A displayed path such
+as `src/[x]:.py` shows U+FF1A as `src/[x]：.py`, while its permalink href is unchanged.
+Without that trigger, a line-initial
+reference-definition label
+(`[label]:`) keeps the existing backslash-before-colon rule when only non-letter characters
+precede `[` on its line. A preceding backslash or another `[` prevents the match if it remains
+in the prefix when the guard runs. For `[[x]: u`, containment first turns the second bracket
+fullwidth, leaving the first bracket as the label opener, so its colon is escaped. In multiline fields,
+the old label may continue across lines, and it still applies inside code spans. This prevents
+a definition from turning code-owned text such as `[CRITICAL]` into a link. A footnote
+label has no rule of its own: its opener is already fullwidth.
+Footnote definitions and reference-style links in finding text therefore show as literal text. The
+inserted colon becomes fullwidth even when copied; the retained line-initial escape displays its
+original colon.
+None of these rules runs inside a trusted fenced payload. Summary titles and location paths
+force the fullwidth colon rule to remain stable when the containing bullet has a link pair;
+ordinary single-line fields keep
+the trigger-based rule.
+
+## Posted body budgets
+
+- `review_body`: plain issue counts, an index of inline leads, and any delivery remainder. Whole index bullets fit within a 12,000-code-point
+  limit; later units join the remainder. The change summary stays in the report's Change Context section. `post_review.py`
+  bounds the summary comment, and every inline comment, discussion and note, with a per-platform
+  UTF-8 byte budget. Each includes its trailer; GitLab discussions and notes also include a live
+  marker when one is appended. Inline folds happen in place at a line boundary with a fold line
+  and may keep or drop a whole committable suggestion; summary folds do not apply that suggestion
+  rule. Every fold emits a stderr notice. The header and footer are reserved first; the summary
+  folds only when it cannot fit beside the skipped-section frame and footer. Skipped groups appear whole or not at all in list order,
+  followed by one closing count line when any group is omitted; the footer stays last.
+
+## Report display folds
+
+The display folds are per field, not a whole-report bound and not a return-budget mechanism. A
+fold that cuts inside a code fence closes it with a fence of the same character and length before
+the fold line. The display fold counts Unicode code points; the posted summary budget counts UTF-8
+bytes.
+Description, suggestion, cited text, cross-file references, extra fields, and corroboration
+descriptions fold after 4,000 Unicode code points. The PR summary counts issues and indexes inline leads. The local Summary keeps its full index.
+The change-summarizer prose appears only in the following Change Context section. A present summary
+has a code-owned lead-in explaining its role as shared review-agent context, then folds at
+`REPORT_FOLD_LIMITS.summaryChars` (`workflows/src/registry.js`). An absent or blank summary uses this exact sentence with no
+lead-in:
+
+```text
+No change summary was produced for this run.
+```
+
+Posted comment budgets and folding follow [Posted body budgets](#posted-body-budgets).
+
+Evidence folds after 40 lines or 8,000 code points, whichever comes first. One-line display
+values fold after 512 code points. Finding cardinality and whole severity buckets never fold.
+Full confirmed finding values remain in `findings.json`; full unverified finding values remain
+in the checkpoint's challenge entry. The report renders any severity value outside `critical`,
+`high`, `medium`, or `low` as `low`, while the original value stays in `findings.json`. The report retains review diagnostics.
+
+## Summary index and host rendering
+
+The PR summary starts with `Found N issues in this change: <severity breakdown>.` Suggested
+improvements get a separate count sentence. Held-back and unverified findings stay in the local
+report. Each selected issue whose lead can post inline gets one index bullet. Unanchored issues
+appear in the Python-rendered section under `### N issues described here`. This section also
+holds new site coverage for issues already posted inline. The poster removes a
+previously indexed lead when its anchor fails at delivery. The workflow supplies `review_summary`
+with prepared counts, ordered `{lead_id, bullet}` records, and remainder data. The poster filters
+by id and preserves contained text verbatim. Python requires its outbound preparation to leave
+all supplied summary text unchanged. Any containment or contract failure omits the index, uses
+code-generated counts, and records a gap without blocking inline comments.
+Bare findings arrays render their own summary from findings with group severity and tier;
+they never extract public text from the local report.
+
+Selection uses original object identity; issue identity uses `delivery_group.issue_key`, falling
+back to legacy `consolidation_key`. The local report keeps the full index and every member's prose.
+Whole index bullets fit within 12,000 code points. Remainders use plain reasons such as `this review
+posts at most 25 issues` or `did not fit in this comment`.
+
+The Summary index prepares each title as a single line, folds it to 512 code points, then
+contains raw HTML and visible mentions even in inline code. Its definition-colon guard
+is forced because the containing bullet has a linked location: a Summary title `[x]: u`
+becomes `[x]` followed by U+FF1A FULLWIDTH COLON and `u`, while an ordinary single-line
+field keeps the `[x]\: u` output. It counts the final bullet after preparation against
+the index budget. Its display path and line sit inside one code span whose delimiter exceeds
+every backtick run in the location. The colon rule is span-blind and rewrites `]` plus zero
+or more backslashes plus `:` inside location paths too: `src/[x]:.py:3` displays as
+`src/[x]：.py:3` with U+FF1A, so copying it no longer yields the original path.
+The permalink href is unchanged. Edge spaces receive CommonMark padding. Display paths
+use fullwidth `＜` and `＠` for dangerous characters, so copying them yields different
+characters. The structured permalink destination percent-encodes the original valid path,
+including any `<` or `@`. Normalization or redaction of the original path suppresses
+the permalink.
+The complete posted comment is assembled in this order: header, body, skipped section, footer.
+For byte budgets and folding, see [Posted body budgets](#posted-body-budgets).

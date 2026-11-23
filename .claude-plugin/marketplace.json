@@ -1,0 +1,18 @@
+{
+  "name": "code-gauntlet",
+  "owner": {
+    "name": "Liatrio"
+  },
+  "metadata": {
+    "description": "Adversarial code review for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "code-gauntlet",
+      "description": "Adversarial code review for Claude Code. Seven specialist agents review each GitHub PR, GitLab MR or local change for bugs, security, tests and cross-file impact, and an eighth reads the changed code their findings missed. Every finding must survive verification, a skeptical validator and a blind challenge before it posts.",
+      "source": "./",
+      "strict": true
+    }
+  ]
+}

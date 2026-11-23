@@ -1,0 +1,55 @@
+# Eval workspace outputs (deep-review-workspace/ retained for pre-rename local dirs)
+deep-review-workspace/
+*-workspace/
+
+# Review output files (deep-review-* entries retained for pre-rename local files)
+code-gauntlet-*.md
+deep-review-*.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local tooling resolver state.
+uv.lock
+
+# Coverage data + reports (CI/dev only; see pyproject.toml [tool.coverage])
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Claude Code local settings (shared project settings.json and project skills are tracked)
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+
+# Internal development artifacts (not shipped)
+docs/specs/
+docs/temp/
+docs/design/
+docs/superpowers/
+docs/improvement-backlog.md
+/.code-gauntlet/
+# pre-rename output dir, retained for local files
+/.deep-review/
+bench/workspace/
+bench/.env
+probes/
+
+# Agentic SDD scratch (plans/briefs/reviews)
+.superpowers/
+
+# Local git worktrees (issue execution isolation)
+.worktrees/

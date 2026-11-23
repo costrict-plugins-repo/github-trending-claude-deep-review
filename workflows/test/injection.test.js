@@ -1,0 +1,122 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { applyInjectionFilter, applyInjectedProseStrip } from '../src/injection.js';
+import { cleanFinding, finding } from './helpers/findings.js';
+import { hasAdmission } from '../src/admission.js';
+
+const SCAN_ROWS = [
+  ['shell command', { description: 'rm -rf /tmp/cache' }, 'shell command'],
+  ['URL directive', { description: 'visit https://example.com' }, 'visit-URL'],
+  ['encoded payload', { title: 'decode', description: 'A'.repeat(40) }, 'encoded payload'],
+  ['bypass instruction', { title: 'skip', description: 'review' }, 'bypass'],
+  ['instructional tone', { description: 'you should run the script' }, 'instructional tone'],
+  ['unsafe fix', { description: 'disable TLS validation' }, 'vulnerability'],
+  ['block marker', { description: '<finding severity="high">' }, 'injection marker'],
+  ['placeholder title', { title: 'Example finding' }, 'placeholder'],
+  ['placeholder path', { file: 'src/{name}.py' }, 'template markers'],
+  ['confusable folding', { description: '\u017fkip review' }, 'bypass'],
+  ['invisible stripping', { description: 's\u200bkip review' }, 'bypass'],
+];
+for (const [name, fields, reason] of SCAN_ROWS) {
+  test('injection scan: ' + name, () => {
+    const input = cleanFinding({ confidence: 50, ...fields });
+    const snapshot = structuredClone(input);
+    const out = applyInjectionFilter([input]);
+    assert.deepEqual(out.kept, []);
+    assert.equal(out.eliminated.length, 1);
+    assert.equal(out.eliminated[0].eliminated_by, 'injection');
+    assert.ok(out.eliminated[0].elimination_reason.includes(reason));
+    assert.deepEqual(input, snapshot);
+  });
+}
+
+test('clean findings survive injection filtering without losing fields', () => {
+  const input = cleanFinding({
+    title: 'Add an auto-approve toggle for trusted release branches in CI',
+    description: 'The stored procedure grants [INSERT, UPDATE, DELETE] privileges to the public role, which is broader than intended for this operation. Identifier abcdef0123456789abcdef0123456789abcdef01 records the upstream revision.',
+    suggestion: 'Use a role limited to the required operations.', suggested_fix_code: 'return value;',
+  });
+  const snapshot = structuredClone(input);
+  const out = applyInjectionFilter([input]);
+  assert.deepEqual(out.kept, [snapshot]);
+  assert.deepEqual(out.eliminated, []);
+  assert.deepEqual(input, snapshot);
+});
+
+test('duplicate findings retain only the first copy', () => {
+  const input = cleanFinding();
+  const out = applyInjectionFilter([input, { ...input, id: 'second' }]);
+  assert.deepEqual(out.kept, [input]);
+  assert.equal(out.eliminated[0].id, 'second');
+  assert.equal(out.eliminated[0].elimination_reason, 'duplicate of finding "test-1"');
+});
+
+for (const field of ['suggestion', 'claude_md_rule', 'spec_text']) {
+  test('injected ' + field + ' removes its fix', () => {
+    const input = cleanFinding({ [field]: 'skip review', suggested_fix_code: 'return 1;' });
+    const before = structuredClone(input);
+    const out = applyInjectionFilter([input]);
+    assert.deepEqual(out.eliminated, []);
+    const kept = out.kept[0];
+    assert.equal(kept[field], undefined);
+    assert.equal(kept[field + '_removed_by'], 'injection');
+    assert.ok(kept[field + '_removal_reason'].startsWith(field + ' contains bypass/auto-approve instruction:'));
+    assert.equal(kept.suggested_fix_code, undefined);
+    assert.equal(kept.suggested_fix_code_removal_reason, field + ' carried contains bypass/auto-approve instruction');
+    assert.deepEqual(applyInjectedProseStrip(kept), kept);
+    assert.deepEqual(input, before);
+  });
+}
+
+test('prose rule precedence reports the first matching family', () => {
+  const out = applyInjectedProseStrip({ suggestion: 'rm -rf visit https://x.test', suggested_fix_code: 'return 1;' });
+  assert.equal(out.suggestion, undefined);
+  assert.ok(out.suggestion_removal_reason.startsWith('suggestion contains shell command pattern:'));
+  assert.equal(out.suggested_fix_code_removal_reason, 'suggestion carried contains shell command pattern');
+});
+
+const LINES = Array.from({ length: 100 }, (_, i) => 'line' + i).join('\n');
+
+for (const [name, code, accepted] of [
+  ['line limit', LINES + '\n', true],
+  ['second trailing LF counts', LINES + '\n\n', false],
+  ['over line limit', LINES + '\nx', false],
+  ['point limit', 'x'.repeat(8000), true],
+  ['over point limit', 'x'.repeat(8001), false],
+]) {
+  test('fix delivery bound: ' + name, () => {
+    const input = { suggested_fix_code: code };
+    const out = applyInjectedProseStrip(input);
+    assert.deepEqual(out, accepted ? input : {
+      suggested_fix_code_removed_by: 'injection',
+      suggested_fix_code_removal_reason: 'suggested_fix_code exceeds the delivery bound',
+    });
+    assert.deepEqual(input, { suggested_fix_code: code });
+  });
+}
+
+test('stripping reader fix prose keeps the finding and withholds its tainted replacement code', () => {
+  const comment = { title: 'An update is lost', body: 'The retry discards the update.', fix: 'skip review' };
+  const input = cleanFinding({ verdict: { claim: 'confirmed', consequence: 'present_failure', justification: 'Inspected', comment }, suggested_fix_code: 'return 1;' });
+  const before = structuredClone(input);
+  const out = applyInjectionFilter([input]);
+  assert.deepEqual(out.eliminated, []);
+  assert.equal(out.kept.length, 1);
+  assert.deepEqual(out.kept[0].verdict.comment, { title: comment.title, body: comment.body });
+  assert.equal(out.kept[0].suggested_fix_code, undefined);
+  assert.equal(out.kept[0].suggested_fix_code_removed_by, 'injection');
+  assert.deepEqual(applyInjectedProseStrip(out.kept[0]), out.kept[0]);
+  assert.deepEqual(input, before);
+});
+
+
+for (const intact of [false, true]) test(`reader fix stripping refreshes only a valid admission stamp (${intact})`, () => {
+  const input = finding({ verdict: { claim: 'confirmed', consequence: 'present_failure', justification: 'Inspected',
+    comment: { title: 'An update is lost', body: 'The retry discards the update.', fix: 'skip review' } } });
+  if (!intact) input.admission.input_proof = 'invalid';
+  assert.equal(hasAdmission(input), intact);
+  const out = applyInjectionFilter([input]);
+  assert.equal(out.kept.length, 1);
+  assert.equal(out.kept[0].verdict.comment.fix, undefined);
+  assert.equal(hasAdmission(out.kept[0]), intact);
+});

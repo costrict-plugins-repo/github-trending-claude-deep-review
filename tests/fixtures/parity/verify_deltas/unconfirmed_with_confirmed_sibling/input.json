@@ -1,0 +1,99 @@
+{
+  "dispatched": [
+    {
+      "id": "bug-201",
+      "file": "src/parser.py",
+      "line_start": 50,
+      "line_end": 52,
+      "title": "Unclosed file handle",
+      "description": "The file opened via open(path) is never closed if the loop below raises, leaking a file descriptor per failed parse.",
+      "severity": "medium",
+      "confidence": 65,
+      "dimension": "bug",
+      "evidence": "f = open(path)",
+      "suggestion": "Use a context manager (with open(path) as f) instead.",
+      "cross_file_refs": [],
+      "anchor": "synthetic_source(0);\nsynthetic_source(1);\nsynthetic_source(2);"
+    },
+    {
+      "id": "bug-202",
+      "file": "src/parser.py",
+      "line_start": 900,
+      "line_end": 902,
+      "title": "Claimed race condition in cache eviction",
+      "description": "The finding cites a lock acquisition around cache eviction at these lines, but no such code exists in the current file.",
+      "severity": "high",
+      "confidence": 75,
+      "dimension": "bug",
+      "evidence": "with cache_lock: evict(key)",
+      "suggestion": "Confirm the lock is actually held at the reported location before filing.",
+      "cross_file_refs": []
+    }
+  ],
+  "result": {
+    "verified": [
+      {
+        "id": "bug-201",
+        "file": "src/parser.py",
+        "line_start": 50,
+        "line_end": 52,
+        "title": "Unclosed file handle",
+        "description": "The file opened via open(path) is never closed if the loop below raises, leaking a file descriptor per failed parse.",
+        "severity": "medium",
+        "confidence": 65,
+        "dimension": "bug",
+        "evidence": "f = open(path)",
+        "suggestion": "Use a context manager (with open(path) as f) instead.",
+        "cross_file_refs": [],
+        "origin": "new",
+        "blame_metadata": {
+          "classification": "new",
+          "author": "Priya Shah",
+          "date": "2026-07-18",
+          "original_severity": "medium"
+        },
+        "factual_verification": {
+          "verified": true,
+          "reason": "file content and symbols verified",
+          "code_at_lines": "f = open(path)"
+        },
+        "diff_validation": {
+          "in_diff": true,
+          "reason": "line 50 found in diff"
+        },
+        "anchor": "synthetic_source(0);\nsynthetic_source(1);\nsynthetic_source(2);",
+        "location_status": "confirmed",
+        "claimed_line_start": 50,
+        "claimed_line_end": 52
+      },
+      {
+        "id": "bug-202",
+        "file": "src/parser.py",
+        "title": "Claimed race condition in cache eviction",
+        "description": "The finding cites a lock acquisition around cache eviction at these lines, but no such code exists in the current file.",
+        "severity": "high",
+        "confidence": 75,
+        "dimension": "bug",
+        "evidence": "with cache_lock: evict(key)",
+        "suggestion": "Confirm the lock is actually held at the reported location before filing.",
+        "cross_file_refs": [],
+        "origin": "new",
+        "blame_metadata": {
+          "classification": "new",
+          "author": null,
+          "date": null,
+          "original_severity": "high"
+        },
+        "factual_verification": {
+          "verified": true,
+          "reason": "location unconfirmed - positional checks skipped",
+          "code_at_lines": null
+        },
+        "location_status": "unconfirmed",
+        "claimed_line_start": 900,
+        "claimed_line_end": 902
+      }
+    ],
+    "eliminated": []
+  }
+}

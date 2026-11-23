@@ -1,0 +1,31 @@
+{
+  "findings": [
+    {
+      "agent": "test-analyzer",
+      "confidence": 70,
+      "description": "short",
+      "dimension": "test_coverage",
+      "file": "h.py",
+      "id": "C5",
+      "line_start": 30,
+      "severity": "low",
+      "title": "t5",
+      "line_end": 30,
+      "location_status": "confirmed"
+    },
+    {
+      "agent": "code-simplifier",
+      "confidence": 70,
+      "description": "this description is considerably longer than the other one",
+      "dimension": "convention",
+      "file": "h.py",
+      "id": "C6",
+      "line_start": 31,
+      "severity": "low",
+      "title": "t6",
+      "line_end": 31,
+      "location_status": "confirmed"
+    }
+  ],
+  "fn": "consolidate_cross_agent"
+}
